@@ -10,7 +10,9 @@ import sqlite3
 from datetime import date
 
 import pandas as pd
+import pydeck as pdk
 import streamlit as st
+from urllib.parse import quote
 
 from core.parse import parse_conditions
 from core.recommend import DB_PATH, load_mapping, recommend
@@ -43,11 +45,36 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def fit_view(df, width_px=700, height_px=500):
+    """점 전체가 들어오도록 줌 계산(pydeck compute_view는 좁은 범위에서 줌을 과하게 잡음)"""
+    import math
+    span_lon = max(df.lon.max() - df.lon.min(), 0.01)
+    span_lat = max(df.lat.max() - df.lat.min(), 0.01) / math.cos(math.radians(df.lat.mean()))
+    z = min(math.log2(360 * width_px / (256 * span_lon)), math.log2(360 * height_px / (256 * span_lat)))
+    return pdk.ViewState(latitude=(df.lat.max() + df.lat.min()) / 2, longitude=(df.lon.max() + df.lon.min()) / 2,
+                         zoom=max(6, min(15, z - 1.4)))
+
+
+def fmt_tel(t):
+    d = "".join(ch for ch in str(t) if ch.isdigit())
+    if d.startswith("02") and len(d) in (9, 10):
+        return f"02-{d[2:-4]}-{d[-4:]}"
+    if len(d) in (10, 11):
+        return f"{d[:3]}-{d[3:-4]}-{d[-4:]}"
+    return t
+
+
 def api_key():
     try:
         return st.secrets.get("ANTHROPIC_API_KEY")
     except Exception:
         return os.environ.get("ANTHROPIC_API_KEY")
+
+
+@st.cache_data(show_spinner=False, max_entries=500)
+def cached_parse(text, use_key):
+    """같은 문장이면 Claude API를 다시 부르지 않는다(버튼 재클릭·새로고침 비용 방지)"""
+    return parse_conditions(text, api_key=api_key() if use_key else None, use_llm=use_key)
 
 
 @st.cache_data
@@ -84,7 +111,7 @@ with st.form("input"):
     time_unknown = c5.checkbox("태어난 시간을 몰라요", value=False)
     query = st.text_area("어디서, 언제, 얼마로 운동하고 싶나요?", key="query",
                          placeholder=EXAMPLES[0], height=80)
-    submitted = st.form_submit_button("추천 받기", type="primary", use_container_width=True)
+    submitted = st.form_submit_button("추천 받기", type="primary", width="stretch")
 
 def _use_example(text):
     st.session_state.query = text  # 콜백은 다음 실행 전에 돌아서 위젯 값 변경이 허용됨
@@ -93,7 +120,7 @@ def _use_example(text):
 st.caption("예시 문장")
 ex_cols = st.columns(len(EXAMPLES))
 for col, ex in zip(ex_cols, EXAMPLES):
-    col.button(ex[:14] + "…", help=ex, use_container_width=True, on_click=_use_example, args=(ex,))
+    col.button(ex[:14] + "…", help=ex, width="stretch", on_click=_use_example, args=(ex,))
 
 if not submitted:
     st.markdown(f"<p class='muted'>{mapping()['disclaimer']}</p>", unsafe_allow_html=True)
@@ -101,7 +128,7 @@ if not submitted:
 
 # ----------------------------------------------------------------------------- 계산
 with st.spinner("사주를 계산하고 강좌를 찾는 중…"):
-    parsed = parse_conditions(query, api_key=api_key())
+    parsed = cached_parse(query.strip(), bool(api_key()))
     birth = {"year": birth_date.year, "month": birth_date.month, "day": birth_date.day,
              "hour": None if time_unknown else birth_hour,
              "minute": 0 if time_unknown else birth_min, "birth_sido": birth_sido}
@@ -179,18 +206,51 @@ for p in picks:
   <div style='margin-top:10px'><b>{c['facility_name']}</b> — {c['program_name']}</div>
   <div class='muted'>{when} · {price} · 대상 {c['target_raw'] or '미상'}{warn}</div>
   <div class='muted'>{c['address']}{stop}</div>
-  <div class='muted'>같은 조건의 {p['sport']} 강좌 {p['more_count']}개 더</div>
 </div>""", unsafe_allow_html=True)
+    # 원천 데이터에는 강좌별 신청 링크가 없고 시설(운영기관) 예약 사이트 주소만 있음(62개 사이트/198개 시설)
+    b1, b2 = st.columns(2)
     if c["homepage"]:
-        st.link_button("신청 페이지 열기", c["homepage"])
+        b1.link_button("예약 사이트 열기", c["homepage"], width="stretch")
+    b2.link_button("지도에서 보기", f"https://map.naver.com/p/search/{quote(c['facility_name'])}",
+                   width="stretch")
+    tel = f" · 문의 {fmt_tel(c['tel'])}" if c.get("tel") else ""
+    st.caption(f"예약 사이트에서 ‘{c['program_name']}’ 강좌를 찾아 신청하세요{tel}")
+    if p["alternatives"]:
+        with st.expander(f"같은 조건의 다른 {p['sport']} 강좌 {p['more_count']}개"):
+            rows = [{"시설": a["facility_name"], "강좌": a["program_name"], "요일": a["weekdays"],
+                     "시간": a["start_time"] or a["time_band"] or "미상",
+                     "가격": f"{a['price']:,}원" if a["price"] else "정보 없음"} for a in p["alternatives"]]
+            st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 for n in res["step2"]["notes"]:
     st.warning(n)
 
-pts = [{"lat": p["class"]["lat"], "lon": p["class"]["lon"]} for p in picks
-       if p["class"]["lat"] and p["class"]["lon"]]
-if pts:
-    st.map(pd.DataFrame(pts), size=60, zoom=11)
+# 추천 강좌 + 같은 조건의 다른 강좌가 열리는 시설을 모아 보여줌. 시설이 1곳이면 지도가 의미 없으므로 생략
+fac = {}
+for p in picks:
+    for cl in [p["class"]] + p["alternatives"]:
+        if not (cl["lat"] and cl["lon"]):
+            continue
+        f = fac.setdefault(cl["facility_name"], {"name": cl["facility_name"], "lat": cl["lat"], "lon": cl["lon"],
+                                                  "sports": set(), "n": 0, "top": False})
+        f["sports"].add(p["sport"])
+        f["n"] += 1
+        f["top"] |= cl is p["class"]
+if len(fac) >= 2:
+    df = pd.DataFrame([{**f, "sports": "·".join(sorted(f["sports"])),
+                        "color": [47, 111, 176, 230] if f["top"] else [134, 142, 150, 170],
+                        "radius": 120 + 40 * min(f["n"], 10)} for f in fac.values()])
+    st.subheader("조건에 맞는 강좌가 있는 곳")
+    st.caption(f"추천 종목의 강좌가 열리는 시설 {len(df)}곳 · 파란 점은 위 카드에 추천된 시설, 점이 클수록 강좌가 많아요 · 점에 마우스를 올리면 시설 이름이 보여요")
+    st.pydeck_chart(pdk.Deck(
+        initial_view_state=fit_view(df),
+        layers=[
+            pdk.Layer("ScatterplotLayer", df, get_position="[lon, lat]", get_fill_color="color",
+                      get_radius="radius", radius_min_pixels=6, radius_max_pixels=22, pickable=True,
+                      stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=1),
+        ],
+        tooltip={"text": "{name}\n{sports} · 강좌 {n}개"},
+    ))
 
 # ----------------------------------------------------------------------------- 출처
 meta = data_meta()

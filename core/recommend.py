@@ -201,7 +201,8 @@ def step2_classes(mapping, saju: SajuResult, step1, cond: Conditions, con):
             if not cs:
                 continue
             cs.sort(key=_class_sort_key)
-            picks.append({**p, "class": _public_class(cs[0]), "more_count": len(cs) - 1})
+            picks.append({**p, "class": _public_class(cs[0]), "more_count": len(cs) - 1,
+                          "alternatives": [_public_class(x) for x in cs[1:21]]})  # 같은 조건의 다른 강좌(최대 20)
             if len(picks) >= MAX_SPORTS:
                 break
         if len(picks) >= MIN_SPORTS or upto >= len(saju.deficiency_ranks):
