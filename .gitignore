@@ -1,0 +1,19 @@
+# 원천 데이터(380MB, GitHub 100MB 제한 초과) — 각자 문화빅데이터플랫폼에서 받아 data/raw/에 둘 것
+data/raw/*
+!data/raw/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 환경변수(API 키)
+.env
+.env.*
+
+# OS / 에디터
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
