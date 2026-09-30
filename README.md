@@ -21,7 +21,24 @@ data/
     ohaeng_sports.json   오행 → 종목 매핑표 (주·보조 오행, 추천 규칙, 문구 가이드 / 재미용 팀 자체 규칙)
 scripts/
   preprocess.py  원천 CSV → programs.sqlite
+core/
+  saju.py        사주 4주·오행 분포·부족 순위 계산 (sajupy + 입춘 경계 보정)
+  recommend.py   1단계 종목 후보 + 2단계 실제 강좌 추천, CLI
+tests/
+  test_core.py   사주 계산·추천 규칙 테스트
 ```
+
+## 추천 실행 (CLI)
+
+```bash
+python -m core.recommend --birth 2000-06-24 --time 12:30 --birth-sido 서울특별시 \
+    --sido 서울특별시 --sigungu 마포구 --days weekday --bands 저녁 --max-price 50000
+python -m pytest -q
+```
+
+- `--time` 생략 시 시주 없이 6글자로 계산
+- `--days`: `weekday` / `weekend` / `화목` 같은 가능 요일(강좌 요일이 전부 이 안에 있어야 매칭)
+- `--bands`: 새벽 / 오전 / 오후 / 저녁
 
 ## 활용 공공데이터
 

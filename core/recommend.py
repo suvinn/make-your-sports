@@ -1,0 +1,305 @@
+"""
+오행 기반 1·2단계 추천
+
+1단계(종목 후보): 사주 부족 오행 → ohaeng_sports.json의 주/보조 오행으로 종목 점수화
+2단계(실제 강좌): 자연어에서 뽑은 조건(Conditions)으로 programs.sqlite 필터링 → 종목당 강좌 1개
+
+규칙 원문은 data/mapping/ohaeng_sports.json의 recommend_rules 참고.
+
+CLI 예시:
+    python -m core.recommend --birth 2000-06-24 --time 12:30 --birth-sido 서울특별시 \
+        --sido 서울특별시 --sigungu 마포구 --days weekday --bands 저녁 --max-price 50000
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sqlite3
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+
+from core.saju import compute_saju, SajuResult
+
+ROOT = Path(__file__).resolve().parents[1]
+MAPPING_PATH = ROOT / "data" / "mapping" / "ohaeng_sports.json"
+DB_PATH = ROOT / "data" / "processed" / "programs.sqlite"
+
+MAX_SPORTS = 5          # 최종 추천 종목 수 상한
+MIN_SPORTS = 3          # 이보다 적으면 다음 순위 오행으로 확장
+DAY_PRESETS = {"weekday": "월화수목금", "weekend": "토일"}
+TIME_BANDS = ["새벽", "오전", "오후", "저녁"]
+
+
+def load_mapping(path=MAPPING_PATH):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+# --------------------------------------------------------------------------- #
+# 1단계: 종목 후보
+# --------------------------------------------------------------------------- #
+def score_sports(mapping, ranks, upto_rank):
+    """
+    ranks: SajuResult.deficiency_ranks (적은 순, 동률 묶음)
+    upto_rank: 몇 순위 부족 오행까지 볼지 (1부터)
+    점수: 1순위 주=3, 1순위 보조=2, 2순위 주=2, 2순위 보조=1, 3순위 이후 주=1, 보조=0.5
+    한 종목이 여러 조건에 걸리면 가장 높은 점수만 사용.
+    """
+    table = {1: (3, 2), 2: (2, 1)}
+    scored = {}
+    for r in range(1, upto_rank + 1):
+        if r > len(ranks):
+            break
+        elems = set(ranks[r - 1])
+        p_score, s_score = table.get(r, (1, 0.5))
+        for sport, info in mapping["sports"].items():
+            s = 0
+            via = None
+            if info["primary"] in elems:
+                s, via = p_score, f"{r}순위 부족 오행 {info['primary']}(주)"
+            elif info.get("secondary") in elems:
+                s, via = s_score, f"{r}순위 부족 오행 {info['secondary']}(보조)"
+            if s and s > scored.get(sport, {}).get("score", 0):
+                scored[sport] = {"sport": sport, "score": s, "rank": r, "via": via,
+                                 "primary": info["primary"], "secondary": info.get("secondary"),
+                                 "reason": info["reason"]}
+    # 점수 내림차순, 동점은 종목명으로 고정(재현성). 실제 동점 처리는 2단계에서 '강좌 있는 종목 우선'
+    return sorted(scored.values(), key=lambda x: (-x["score"], x["sport"]))
+
+
+def step1_candidates(mapping, saju: SajuResult):
+    """1순위 부족 오행으로 풀을 만들고, 3개 미만이면 2순위까지 확장. 표시용 후보는 상위 5개."""
+    upto = 1
+    pool = score_sports(mapping, saju.deficiency_ranks, upto)
+    while len(pool) < MIN_SPORTS and upto < len(saju.deficiency_ranks):
+        upto += 1
+        pool = score_sports(mapping, saju.deficiency_ranks, upto)
+    return {"upto_rank": upto, "pool": pool, "candidates": pool[:MAX_SPORTS]}
+
+
+# --------------------------------------------------------------------------- #
+# 2단계: 실제 강좌
+# --------------------------------------------------------------------------- #
+@dataclass
+class Conditions:
+    """자연어 파싱 결과가 들어오는 자리. 모든 필드는 선택(None이면 필터 안 함)."""
+    sido: str | None = None                 # "서울특별시"
+    sigungu: list[str] | None = None        # ["마포구", "서대문구"]
+    days: str | None = None                 # "weekday" | "weekend" | "월수금" 같은 가능 요일 문자열
+    time_bands: list[str] | None = None     # ["저녁"] (새벽/오전/오후/저녁)
+    start_after: str | None = None          # "19:00" 이후 시작
+    start_before: str | None = None         # "21:00" 이전 시작
+    max_price: int | None = None            # 원
+    adult: bool = True                      # 성인 사용자면 아동 전용 강좌 제외
+
+    @classmethod
+    def from_dict(cls, d):
+        known = {k: v for k, v in (d or {}).items() if k in cls.__dataclass_fields__}
+        if isinstance(known.get("sigungu"), str):
+            known["sigungu"] = [known["sigungu"]]
+        return cls(**known)
+
+
+def _available_days(days):
+    if not days:
+        return None
+    return DAY_PRESETS.get(days, "".join(c for c in "월화수목금토일" if c in days)) or None
+
+
+def query_classes(con, sports, cond: Conditions):
+    """조건에 맞는 강좌 전부(종목 제한). 불확실 필드는 제외하지 않고 uncertain 목록에 표시."""
+    if not sports:
+        return []
+    sql = ["SELECT * FROM programs WHERE sport IN (%s)" % ",".join("?" * len(sports))]
+    args = list(sports)
+    if cond.sido:
+        sql.append("AND sido = ?")
+        args.append(cond.sido)
+    if cond.sigungu:
+        sql.append("AND sigungu IN (%s)" % ",".join("?" * len(cond.sigungu)))
+        args += cond.sigungu
+    if cond.max_price is not None:
+        sql.append("AND price IS NOT NULL AND price <= ?")
+        args.append(cond.max_price)
+    if cond.adult:
+        sql.append("AND (adult_ok IS NULL OR adult_ok = 1)")
+    con.row_factory = sqlite3.Row
+    rows = [dict(r) for r in con.execute(" ".join(sql), args)]
+
+    avail = _available_days(cond.days)
+    out = []
+    for r in rows:
+        uncertain = []
+        # 요일: 강좌 요일이 전부 가능 요일 안에 있어야 함(월수금 강좌는 화목만 되는 사람에게 불가)
+        if avail:
+            if not r["weekdays"]:
+                continue  # 요일 없는 강좌는 60건뿐이라 제외
+            if any(c not in avail for c in r["weekdays"]):
+                continue
+        # 시간대
+        if cond.time_bands:
+            if r["time_band"] is None:
+                uncertain.append("시간")
+            elif r["time_band"] not in cond.time_bands:
+                continue
+        if cond.start_after or cond.start_before:
+            if r["start_time"] is None:
+                if "시간" not in uncertain:
+                    uncertain.append("시간")
+            else:
+                if cond.start_after and r["start_time"] < cond.start_after:
+                    continue
+                if cond.start_before and r["start_time"] > cond.start_before:
+                    continue
+        if cond.adult and r["adult_ok"] is None:
+            uncertain.append("대상")
+        if r["price"] == 0:
+            uncertain.append("가격")  # 0원은 무료인지 미입력인지 알 수 없음
+        r["uncertain"] = uncertain
+        out.append(r)
+    return out
+
+
+def _class_sort_key(r):
+    # 불확실 필드 적은 순 → 가격 낮은 순 → 도보 시간 짧은 순(NULL은 뒤로)
+    return (len(r["uncertain"]),
+            r["price"] if r["price"] is not None else 10**9,
+            r["walk_min"] if r["walk_min"] is not None else 10**6)
+
+
+def _public_class(r):
+    keys = ["id", "facility_name", "sido", "sigungu", "address", "lat", "lon", "nearest_stop", "walk_min",
+            "program_name", "target_raw", "weekdays", "start_time", "end_time", "time_band",
+            "begin_date", "end_date", "capacity", "price", "homepage", "tel", "uncertain"]
+    return {k: r.get(k) for k in keys}
+
+
+def step2_classes(mapping, saju: SajuResult, step1, cond: Conditions, con):
+    """
+    1단계 풀을 점수순으로 훑으며 조건에 맞는 강좌가 있는 종목만 채택(최대 5개, 종목당 1강좌).
+    채택 종목이 3개 미만이면 다음 순위 부족 오행으로 풀을 넓혀 다시 훑는다.
+    """
+    upto = step1["upto_rank"]
+    pool = step1["pool"]
+    notes = []
+    while True:
+        classes = query_classes(con, [p["sport"] for p in pool], cond)
+        by_sport = {}
+        for c in classes:
+            by_sport.setdefault(c["sport"], []).append(c)
+        picks = []
+        for p in pool:  # 점수순 → 동점이면 강좌 있는 종목이 자연스럽게 먼저 채택됨
+            cs = by_sport.get(p["sport"])
+            if not cs:
+                continue
+            cs.sort(key=_class_sort_key)
+            picks.append({**p, "class": _public_class(cs[0]), "more_count": len(cs) - 1})
+            if len(picks) >= MAX_SPORTS:
+                break
+        if len(picks) >= MIN_SPORTS or upto >= len(saju.deficiency_ranks):
+            break
+        upto += 1
+        pool = score_sports(mapping, saju.deficiency_ranks, upto)
+
+    if upto > step1["upto_rank"]:
+        added = "·".join(e for r in saju.deficiency_ranks[step1["upto_rank"]:upto] for e in r)
+        notes.append(f"조건에 맞는 강좌가 부족해 {added} 기운의 종목까지 넓혀서 찾았어요.")
+    if not picks:
+        notes.append("조건에 맞는 강좌를 찾지 못했어요. 지역·요일·시간·예산 중 하나를 넓혀보세요.")
+    elif len(picks) < MIN_SPORTS:
+        notes.append("조건에 맞는 강좌가 적어요. 지역·요일·시간·예산 중 하나를 넓혀보세요.")
+    if not cond.sido and not cond.sigungu:
+        notes.append("지역 조건이 없어 전국 강좌에서 골랐어요.")
+    return {"upto_rank": upto, "picks": picks, "notes": notes}
+
+
+# --------------------------------------------------------------------------- #
+# 통합
+# --------------------------------------------------------------------------- #
+def recommend(birth: dict, conditions: dict | Conditions, db_path=DB_PATH, mapping=None):
+    """
+    birth: {"year": 2000, "month": 6, "day": 24, "hour": 12, "minute": 30, "birth_sido": "서울특별시"}
+           hour를 모르면 None
+    conditions: Conditions 또는 dict(LLM 파싱 결과)
+    """
+    mapping = mapping or load_mapping()
+    cond = conditions if isinstance(conditions, Conditions) else Conditions.from_dict(conditions)
+    saju = compute_saju(birth["year"], birth["month"], birth["day"], birth.get("hour"),
+                        birth.get("minute", 0), birth.get("birth_sido"))
+    s1 = step1_candidates(mapping, saju)
+    con = sqlite3.connect(db_path)
+    try:
+        s2 = step2_classes(mapping, saju, s1, cond, con)
+    finally:
+        con.close()
+    first = saju.deficiency_ranks[0]
+    return {
+        "saju": saju.to_dict(),
+        "message": [mapping["elements"][e]["boost_message"] for e in first],
+        "disclaimer": mapping["disclaimer"],
+        "step1": {"upto_rank": s1["upto_rank"],
+                  "candidates": [{k: c[k] for k in ("sport", "score", "via", "reason")} for c in s1["candidates"]]},
+        "step2": s2,
+        "conditions": asdict(cond),
+    }
+
+
+def list_regions(db_path=DB_PATH):
+    """데이터에 있는 시도→시군구 목록(자연어 파싱 결과 검증·LLM 도구용)"""
+    con = sqlite3.connect(db_path)
+    try:
+        rows = con.execute("SELECT sido, sigungu, COUNT(*) FROM programs GROUP BY sido, sigungu").fetchall()
+    finally:
+        con.close()
+    out = {}
+    for sido, sgg, n in rows:
+        out.setdefault(sido, {})[sgg] = n
+    return out
+
+
+def _cli():
+    ap = argparse.ArgumentParser(description="사주 기반 체육 강좌 추천 (1·2단계)")
+    ap.add_argument("--birth", required=True, help="양력 생년월일 YYYY-MM-DD")
+    ap.add_argument("--time", help="태어난 시각 HH:MM (모르면 생략)")
+    ap.add_argument("--birth-sido", default="서울특별시")
+    ap.add_argument("--sido")
+    ap.add_argument("--sigungu", nargs="*")
+    ap.add_argument("--days", help="weekday | weekend | 월수금 등")
+    ap.add_argument("--bands", nargs="*", choices=TIME_BANDS)
+    ap.add_argument("--start-after")
+    ap.add_argument("--start-before")
+    ap.add_argument("--max-price", type=int)
+    ap.add_argument("--child", action="store_true", help="아동 사용자(성인 필터 해제)")
+    a = ap.parse_args()
+
+    y, m, d = map(int, a.birth.split("-"))
+    hh, mm = (map(int, a.time.split(":")) if a.time else (None, 0))
+    birth = {"year": y, "month": m, "day": d, "hour": hh, "minute": mm, "birth_sido": a.birth_sido}
+    cond = Conditions(sido=a.sido, sigungu=a.sigungu, days=a.days, time_bands=a.bands,
+                      start_after=a.start_after, start_before=a.start_before,
+                      max_price=a.max_price, adult=not a.child)
+    res = recommend(birth, cond)
+
+    s = res["saju"]
+    print("사주:", " ".join(f"{k}:{v}" for k, v in s["pillars"].items() if v), "| 오행:", s["counts"])
+    print("부족 순위:", " > ".join("·".join(r) for r in s["deficiency_ranks"]))
+    for msg in res["message"]:
+        print("풀이:", msg)
+    print("\n[1단계 종목 후보]")
+    for c in res["step1"]["candidates"]:
+        print(f"  {c['sport']} ({c['score']}점, {c['via']})")
+    print("\n[2단계 추천 강좌]")
+    for p in res["step2"]["picks"]:
+        c = p["class"]
+        price = f"{c['price']:,}원" if c["price"] is not None else "가격 미상"
+        when = f"{c['weekdays'] or '?'} {c['start_time'] or c['time_band'] or '시간 미상'}"
+        unc = f" ⚠ {','.join(c['uncertain'])} 확인 필요" if c["uncertain"] else ""
+        print(f"  [{p['sport']}] {c['facility_name']} · {c['program_name']} · {when} · {price}"
+              f" (+{p['more_count']}개 더){unc}")
+    for n in res["step2"]["notes"]:
+        print("  ※", n)
+    print("\n" + res["disclaimer"])
+
+
+if __name__ == "__main__":
+    _cli()
