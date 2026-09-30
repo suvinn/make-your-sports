@@ -42,29 +42,33 @@ def score_sports(mapping, ranks, upto_rank):
     """
     ranks: SajuResult.deficiency_ranks (적은 순, 동률 묶음)
     upto_rank: 몇 순위 부족 오행까지 볼지 (1부터)
-    점수: 1순위 주=3, 1순위 보조=2, 2순위 주=2, 2순위 보조=1, 3순위 이후 주=1, 보조=0.5
-    한 종목이 여러 조건에 걸리면 가장 높은 점수만 사용.
+
+    우선순위 계층(tier, 작을수록 우선):
+        1 = 1순위 부족 오행의 주 종목
+        2 = 1순위 부족 오행의 보조 종목
+        3 = 2순위 부족 오행의 주 종목
+        4 = 2순위 부족 오행의 보조 종목 ... (n순위: 주=2n-1, 보조=2n)
+    한 종목이 여러 계층에 걸리면 가장 우선인 계층만 사용.
+    보조 종목을 허용하는 이유: 목적이 '부족 오행과 완전히 일치하는 종목만 보여주기'가 아니라
+    '부족 오행을 기준으로 취미를 탐색'하게 하는 것이고, 보조 오행도 그 오행을 반영하는 후보이기 때문.
     """
-    table = {1: (3, 2), 2: (2, 1)}
-    scored = {}
-    for r in range(1, upto_rank + 1):
-        if r > len(ranks):
-            break
+    best = {}
+    for r in range(1, min(upto_rank, len(ranks)) + 1):
         elems = set(ranks[r - 1])
-        p_score, s_score = table.get(r, (1, 0.5))
         for sport, info in mapping["sports"].items():
-            s = 0
-            via = None
             if info["primary"] in elems:
-                s, via = p_score, f"{r}순위 부족 오행 {info['primary']}(주)"
+                tier, role, elem = 2 * r - 1, "주", info["primary"]
             elif info.get("secondary") in elems:
-                s, via = s_score, f"{r}순위 부족 오행 {info['secondary']}(보조)"
-            if s and s > scored.get(sport, {}).get("score", 0):
-                scored[sport] = {"sport": sport, "score": s, "rank": r, "via": via,
-                                 "primary": info["primary"], "secondary": info.get("secondary"),
-                                 "reason": info["reason"]}
-    # 점수 내림차순, 동점은 종목명으로 고정(재현성). 실제 동점 처리는 2단계에서 '강좌 있는 종목 우선'
-    return sorted(scored.values(), key=lambda x: (-x["score"], x["sport"]))
+                tier, role, elem = 2 * r, "보조", info["secondary"]
+            else:
+                continue
+            if sport not in best or tier < best[sport]["tier"]:
+                best[sport] = {"sport": sport, "tier": tier, "rank": r, "role": role, "element": elem,
+                               "via": f"{r}순위 부족 오행 {elem}({role})",
+                               "primary": info["primary"], "secondary": info.get("secondary"),
+                               "reason": info["reason"]}
+    # 명시적 tie-break: 계층 → 종목명(재현성). 같은 계층 안에서는 2단계가 '강좌 있는 종목'을 먼저 채택
+    return sorted(best.values(), key=lambda x: (x["tier"], x["sport"]))
 
 
 def step1_candidates(mapping, saju: SajuResult):
@@ -180,7 +184,7 @@ def _public_class(r):
 
 def step2_classes(mapping, saju: SajuResult, step1, cond: Conditions, con):
     """
-    1단계 풀을 점수순으로 훑으며 조건에 맞는 강좌가 있는 종목만 채택(최대 5개, 종목당 1강좌).
+    1단계 풀을 우선순위(계층)순으로 훑으며 조건에 맞는 강좌가 있는 종목만 채택(최대 5개, 종목당 1강좌).
     채택 종목이 3개 미만이면 다음 순위 부족 오행으로 풀을 넓혀 다시 훑는다.
     """
     upto = step1["upto_rank"]
@@ -192,7 +196,7 @@ def step2_classes(mapping, saju: SajuResult, step1, cond: Conditions, con):
         for c in classes:
             by_sport.setdefault(c["sport"], []).append(c)
         picks = []
-        for p in pool:  # 점수순 → 동점이면 강좌 있는 종목이 자연스럽게 먼저 채택됨
+        for p in pool:  # 계층순 → 같은 계층이면 강좌 있는 종목이 자연스럽게 먼저 채택됨
             cs = by_sport.get(p["sport"])
             if not cs:
                 continue
@@ -242,7 +246,8 @@ def recommend(birth: dict, conditions: dict | Conditions, db_path=DB_PATH, mappi
         "message": [mapping["elements"][e]["boost_message"] for e in first],
         "disclaimer": mapping["disclaimer"],
         "step1": {"upto_rank": s1["upto_rank"],
-                  "candidates": [{k: c[k] for k in ("sport", "score", "via", "reason")} for c in s1["candidates"]]},
+                  "candidates": [{k: c[k] for k in ("sport", "tier", "role", "element", "via", "reason")}
+                                 for c in s1["candidates"]]},
         "step2": s2,
         "conditions": asdict(cond),
     }
@@ -291,7 +296,7 @@ def _cli():
         print("풀이:", msg)
     print("\n[1단계 종목 후보]")
     for c in res["step1"]["candidates"]:
-        print(f"  {c['sport']} ({c['score']}점, {c['via']})")
+        print(f"  {c['sport']} (계층 {c['tier']}, {c['via']})")
     print("\n[2단계 추천 강좌]")
     for p in res["step2"]["picks"]:
         c = p["class"]

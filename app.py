@@ -162,8 +162,11 @@ picks = res["step2"]["picks"]
 m = mapping()
 for p in picks:
     c = p["class"]
-    elem = p["primary"] if p["via"] and "(주)" in p["via"] else p["secondary"]
-    role = "주" if p["via"] and "(주)" in p["via"] else "보조"
+    elem = p["element"]
+    if p["role"] == "주":
+        label = f"{elem}({HANJA[elem]}) 종목"
+    else:
+        label = f"{elem}({HANJA[elem]}) 기운을 곁들인 {p['primary']}({HANJA[p['primary']]}) 종목"
     price = f"{c['price']:,}원" if c["price"] else "가격 정보 없음"
     when = f"{c['weekdays'] or '요일 미상'} · {c['start_time'] or c['time_band'] or '시간 미상'}"
     stop = f" · {c['nearest_stop']} 도보 {c['walk_min']}분" if c["nearest_stop"] and c["walk_min"] else ""
@@ -171,7 +174,7 @@ for p in picks:
     color = ELEMENT_COLOR.get(elem, "#495057")
     st.markdown(f"""
 <div class='card'>
-  <h4>{p['sport']} <span style='color:{color};font-size:0.85rem'>● {elem}({HANJA.get(elem, '')}) {role} 종목</span></h4>
+  <h4>{p['sport']} <span style='color:{color};font-size:0.85rem'>● {label}</span></h4>
   <div class='muted'>{p['reason']}</div>
   <div style='margin-top:10px'><b>{c['facility_name']}</b> — {c['program_name']}</div>
   <div class='muted'>{when} · {price} · 대상 {c['target_raw'] or '미상'}{warn}</div>

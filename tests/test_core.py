@@ -41,11 +41,23 @@ def test_ipchun_year_boundary_fix(y, m, d, h, expected_year):
 
 
 # ---------------- 1단계 ----------------
-def test_step1_primary_scores_higher_than_secondary():
+def test_step1_tier_hierarchy():
+    # 목 1순위, 금 2순위: 1순위 주(1) > 1순위 보조(2) > 2순위 주(3) > 2순위 보조(4)
+    pool = score_sports(MAPPING, [["목"], ["금"]], 2)
+    tier = {p["sport"]: p["tier"] for p in pool}
+    assert tier["요가"] == 1                 # 목(주)
+    assert tier["필라테스"] == 2             # 토(주)·목(보조)
+    assert tier["테니스"] == 3               # 금(주)
+    assert tier["골프"] == 4                 # 토(주)·금(보조)
+    # 1순위 보조(댄스)와 2순위 주(테니스)가 더 이상 동점이 아님
+    assert tier["댄스"] < tier["테니스"]
+    order = [p["tier"] for p in pool]
+    assert order == sorted(order)
+
+
+def test_step1_rank1_only_excludes_rank2():
     pool = score_sports(MAPPING, [["목"], ["금"]], 1)
-    scores = {p["sport"]: p["score"] for p in pool}
-    assert scores["요가"] == 3 and scores["필라테스"] == 2   # 필라테스는 토(주)·목(보조)
-    assert "테니스" not in scores                             # 2순위는 아직 안 봄
+    assert "테니스" not in {p["sport"] for p in pool}
 
 
 def test_step1_candidates_capped_and_distinct():
@@ -99,3 +111,16 @@ def test_recommend_expands_rank_when_strict():
                     {"sido": "충청남도", "days": "weekend"})
     assert res["step2"]["upto_rank"] > 1 or len(res["step2"]["picks"]) >= 3
     assert res["step2"]["notes"]
+
+
+def test_zero_price_excluded_under_budget():
+    con = sqlite3.connect(DB_PATH)
+    rows = query_classes(con, ["수영", "필라테스"], Conditions(sido="서울특별시", max_price=50000))
+    assert rows and all(r["price"] and 0 < r["price"] <= 50000 for r in rows)
+
+
+def test_zero_price_kept_as_uncertain_without_budget():
+    con = sqlite3.connect(DB_PATH)
+    rows = query_classes(con, ["수영"], Conditions(sido="서울특별시", sigungu=["영등포구"]))
+    zero = [r for r in rows if r["price"] == 0]
+    assert zero and all("가격" in r["uncertain"] for r in zero)
