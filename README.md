@@ -1,8 +1,8 @@
-# 사주 기반 체육 취미 추천
+# 사주 기반 체육 취미 추천 (가칭)
 
 2026 국민체육진흥공단 공공데이터 활용 경진대회 — 서비스(앱·웹) 개발 부문 출품작
 
-생년월일시로 오행 분포를 계산하고, 자연어로 받은 조건(지역·요일·시간·예산)에 맞는
+생년월일시로 오행 분포를 계산하고(재미용), 자연어로 받은 조건(지역·요일·시간·예산)에 맞는
 **실제 공공체육시설 강좌**를 추천합니다.
 
 ```
@@ -21,12 +21,23 @@ data/
     ohaeng_sports.json   오행 → 종목 매핑표 (주·보조 오행, 추천 규칙, 문구 가이드 / 재미용 팀 자체 규칙)
 scripts/
   preprocess.py  원천 CSV → programs.sqlite
+app.py           Streamlit 웹 화면
 core/
+  parse.py       자연어 → 검색 조건(Claude API, 실패 시 규칙 기반) + 지역명 검증
   saju.py        사주 4주·오행 분포·부족 순위 계산 (sajupy + 입춘 경계 보정)
   recommend.py   1단계 종목 후보 + 2단계 실제 강좌 추천, CLI
 tests/
   test_core.py   사주 계산·추천 규칙 테스트
 ```
+
+## 웹 실행
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml   # ANTHROPIC_API_KEY 입력
+streamlit run app.py
+```
+
+API 키가 없거나 호출이 실패하면 규칙 기반 분석기로 자동 전환됩니다(화면에 '기본 분석' 표시).
 
 ## 추천 실행 (CLI)
 

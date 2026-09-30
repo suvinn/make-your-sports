@@ -85,7 +85,9 @@ class Conditions:
     """자연어 파싱 결과가 들어오는 자리. 모든 필드는 선택(None이면 필터 안 함)."""
     sido: str | None = None                 # "서울특별시"
     sigungu: list[str] | None = None        # ["마포구", "서대문구"]
-    days: str | None = None                 # "weekday" | "weekend" | "월수금" 같은 가능 요일 문자열
+    days: str | None = None                 # 사용자가 '참석 가능한' 요일 집합(희망 요일 아님)
+                                            # "weekday"(평일 가능) | "weekend"(주말 가능) | "화목"(화·목만 가능)
+                                            # 강좌의 모든 요일이 이 집합 안에 있어야 매칭됨
     time_bands: list[str] | None = None     # ["저녁"] (새벽/오전/오후/저녁)
     start_after: str | None = None          # "19:00" 이후 시작
     start_before: str | None = None         # "21:00" 이전 시작
@@ -119,7 +121,9 @@ def query_classes(con, sports, cond: Conditions):
         sql.append("AND sigungu IN (%s)" % ",".join("?" * len(cond.sigungu)))
         args += cond.sigungu
     if cond.max_price is not None:
-        sql.append("AND price IS NOT NULL AND price <= ?")
+        # 0원은 무료가 아니라 시설 단위 가격 미입력으로 확인됨(0원 강좌 시설의 93%가 가격 정보 자체가 없음)
+        # → NULL과 마찬가지로 예산 조건을 확인할 수 없으므로 제외
+        sql.append("AND price IS NOT NULL AND price > 0 AND price <= ?")
         args.append(cond.max_price)
     if cond.adult:
         sql.append("AND (adult_ok IS NULL OR adult_ok = 1)")
@@ -153,8 +157,8 @@ def query_classes(con, sports, cond: Conditions):
                     continue
         if cond.adult and r["adult_ok"] is None:
             uncertain.append("대상")
-        if r["price"] == 0:
-            uncertain.append("가격")  # 0원은 무료인지 미입력인지 알 수 없음
+        if not r["price"]:
+            uncertain.append("가격")  # 0원/NULL = 가격 미입력(예산 조건이 없을 때만 여기까지 옴)
         r["uncertain"] = uncertain
         out.append(r)
     return out
@@ -163,7 +167,7 @@ def query_classes(con, sports, cond: Conditions):
 def _class_sort_key(r):
     # 불확실 필드 적은 순 → 가격 낮은 순 → 도보 시간 짧은 순(NULL은 뒤로)
     return (len(r["uncertain"]),
-            r["price"] if r["price"] is not None else 10**9,
+            r["price"] if r["price"] else 10**9,  # 0원/NULL은 가장 비싼 것처럼 뒤로
             r["walk_min"] if r["walk_min"] is not None else 10**6)
 
 
@@ -291,7 +295,7 @@ def _cli():
     print("\n[2단계 추천 강좌]")
     for p in res["step2"]["picks"]:
         c = p["class"]
-        price = f"{c['price']:,}원" if c["price"] is not None else "가격 미상"
+        price = f"{c['price']:,}원" if c["price"] else "가격 정보 없음"
         when = f"{c['weekdays'] or '?'} {c['start_time'] or c['time_band'] or '시간 미상'}"
         unc = f" ⚠ {','.join(c['uncertain'])} 확인 필요" if c["uncertain"] else ""
         print(f"  [{p['sport']}] {c['facility_name']} · {c['program_name']} · {when} · {price}"

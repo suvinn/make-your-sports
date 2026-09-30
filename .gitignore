@@ -17,3 +17,6 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+
+# Streamlit 비밀값
+.streamlit/secrets.toml
