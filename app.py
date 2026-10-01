@@ -5,7 +5,9 @@ API 키: .streamlit/secrets.toml 의 ANTHROPIC_API_KEY (없으면 기본 분석�
 """
 from __future__ import annotations
 
+import dataclasses
 import html
+import json
 import math
 import os
 import sqlite3
@@ -17,6 +19,7 @@ import pydeck as pdk
 import streamlit as st
 
 from core.parse import parse_conditions
+from core.reading import make_reading
 from core.recommend import DB_PATH, load_mapping, recommend
 from core.saju import ELEMENT_OF, SIDO_LONGITUDE
 
@@ -182,6 +185,12 @@ def cached_parse(text, use_key):
     return parse_conditions(text, api_key=api_key() if use_key else None, use_llm=use_key)
 
 
+@st.cache_data(show_spinner=False, max_entries=500)
+def cached_reading(saju_json, picks_json, use_key):
+    """같은 사주·같은 추천 종목이면 풀이를 다시 생성하지 않는다"""
+    return make_reading(json.loads(saju_json), json.loads(picks_json), mapping(), api_key() if use_key else None)
+
+
 @st.cache_data
 def mapping():
     return load_mapping()
@@ -248,18 +257,39 @@ ex_cols = st.columns(len(EXAMPLES))
 for col, ex in zip(ex_cols, EXAMPLES):
     col.button(ex[:14] + "…", help=ex, width="stretch", on_click=_use_example, args=(ex,))
 
-if not submitted:
+# 지도 클릭 등으로 다시 실행돼도 결과가 유지되도록 마지막 입력을 세션에 저장
+if submitted:
+    st.session_state.last = {
+        "query": query.strip(),
+        "birth": {"year": birth_date.year, "month": birth_date.month, "day": birth_date.day,
+                  "hour": None if time_unknown else birth_hour,
+                  "minute": 0 if time_unknown else birth_min, "birth_sido": birth_sido},
+    }
+    st.session_state.focus = None
+if "last" not in st.session_state:
     H(f"<div class='foot'>{mapping()['disclaimer']}</div>")
     st.stop()
+last = st.session_state.last
+focus = st.session_state.get("focus")
+
+
+def _clear_focus():
+    st.session_state.focus = None
+
 
 # ============================================================================ 계산
 with st.spinner("사주를 계산하고 강좌를 찾는 중…"):
-    q = query.strip()
+    q = last["query"]
     parsed = cached_parse(q, bool(api_key()))
-    birth = {"year": birth_date.year, "month": birth_date.month, "day": birth_date.day,
-             "hour": None if time_unknown else birth_hour,
-             "minute": 0 if time_unknown else birth_min, "birth_sido": birth_sido}
-    res = recommend(birth, parsed["conditions"])
+    run_cond = dataclasses.replace(parsed["conditions"])  # 캐시된 객체를 건드리지 않게 복사
+    if focus:  # 지도에서 고른 시설의 시·군·구로 좁히기(나머지 조건은 유지)
+        run_cond.sido, run_cond.sigungu, run_cond.radius_km = focus["sido"], [focus["sigungu"]], None
+    res = recommend(last["birth"], run_cond)
+    picks = res["step2"]["picks"]
+    brief = [{k: p[k] for k in ("sport", "element", "role", "primary", "reason")} for p in picks]
+    saju_brief = {k: res["saju"][k] for k in ("pillars", "counts", "deficiency_ranks", "day_stem", "day_element")}
+    reading = cached_reading(json.dumps(saju_brief, ensure_ascii=False), json.dumps(brief, ensure_ascii=False),
+                             bool(api_key()))
 
 # ============================================================================ 검색 조건
 cond = res["conditions"]
@@ -291,8 +321,12 @@ else:
         "<span class='muted'>문장에서 조건을 찾지 못해 전체 강좌에서 찾았어요.</span>"
     badge = f"<span class='badge'>{'AI 분석' if parsed['source'] == 'llm' else '기본 분석'}</span>"
 H(f"<div class='cond'><div class='head'><b>검색 조건</b>{badge}</div>{body}</div>")
-for w in parsed["warnings"]:
-    st.info(w)
+if focus:
+    st.info(f"지도에서 고른 ‘{focus['name']}’ 시설이 있는 {focus['sigungu']}로 좁혀서 다시 추천했어요.")
+    st.button("원래 조건으로 돌아가기", on_click=_clear_focus)
+else:
+    for w in parsed["warnings"]:
+        st.info(w)
 
 # ============================================================================ 사주
 saju = res["saju"]
@@ -327,13 +361,12 @@ for e in ELEMENTS:
              f"<div class='nm'>{e}<span class='hj'>{HANJA[e]}</span>{badge_low}</div>"
              f"<div class='track'><div class='fill' style='width:{max(w, 3 if n else 0)}%;background:{ELEMENT_COLOR[e]}'></div></div>"
              f"<div class='ct'>{n}/{total}</div></div>")
-reading = "<br>".join(E(msg) for msg in res["message"])
-H(f"<div class='oheng'>{rows}<div class='reading'>{reading}</div></div>")
+ai_badge = "<span class='badge' style='margin-left:.4rem'>AI 풀이</span>" if reading["source"] == "llm" else ""
+H(f"<div class='oheng'>{rows}<div class='reading'>{E(reading['summary'])}{ai_badge}</div></div>")
 for n in saju["notes"]:
     st.caption(n)
 
 # ============================================================================ 추천
-picks = res["step2"]["picks"]
 section("추천 강좌", f"{len(picks)}개 종목 · 종목마다 조건에 가장 잘 맞는 강좌 하나씩")
 m = mapping()
 for i, p in enumerate(picks, 1):
@@ -353,7 +386,7 @@ for i, p in enumerate(picks, 1):
     H(f"""
 <div class='rec' style='--c:{color};--t:{tint}'>
   <div class='rec-head'><span class='rank'>{i:02d}</span><span class='sport'>{E(p['sport'])}</span><span class='pill'>{label}</span></div>
-  <div class='reason'>{E(p['reason'])}</div>
+  <div class='reason'>{E(reading['comments'].get(p['sport'], p['reason']))}</div>
   <div class='cls'>
     <div class='fac'>{E(c['facility_name'])}</div>
     <div class='prog'>{E(c['program_name'])}</div>
@@ -393,6 +426,7 @@ for p in picks:
         if not (cl["lat"] and cl["lon"]):
             continue
         f = fac.setdefault(cl["facility_name"], {"name": cl["facility_name"], "lat": cl["lat"], "lon": cl["lon"],
+                                                  "sido": cl["sido"], "sigungu": cl["sigungu"],
                                                   "sports": set(), "n": 0, "top": False})
         f["sports"].add(p["sport"])
         f["n"] += 1
@@ -405,23 +439,30 @@ if len(fac) >= 2 or (has_near and fac):
     section("조건에 맞는 강좌가 있는 곳", f"시설 {len(df)}곳")
     st.markdown("<div class='muted' style='margin-bottom:.5rem'>붉은 점은 위에 추천된 시설, 회색 점은 같은 조건의 다른 강좌가 있는 시설이에요. "
                 "점이 클수록 강좌가 많고, 마우스를 올리면 시설 이름이 보여요."
-      + (" 검은 점은 입력한 위치예요." if has_near else "") + "</div>", unsafe_allow_html=True)
-    layers = [pdk.Layer("ScatterplotLayer", df, get_position="[lon, lat]", get_fill_color="color",
+      + (" 검은 점은 입력한 위치예요." if has_near else "")
+      + " <b>점을 누르면 그 시설이 있는 지역으로 좁혀서 다시 추천해요.</b></div>", unsafe_allow_html=True)
+    layers = [pdk.Layer("ScatterplotLayer", df, id="fac", get_position="[lon, lat]", get_fill_color="color",
                         get_radius="radius", radius_min_pixels=6, radius_max_pixels=22, pickable=True,
                         stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=1)]
     view_df = df[["lat", "lon"]]
     if has_near:
         me = pd.DataFrame([{"name": f"{cond['near_label']} (입력한 곳)", "lat": cond["near_lat"], "lon": cond["near_lon"],
                             "sports": "기준 위치", "n": 0}])
-        layers.append(pdk.Layer("ScatterplotLayer", me, get_position="[lon, lat]", get_fill_color=[30, 36, 48, 255],
+        layers.append(pdk.Layer("ScatterplotLayer", me, id="me", get_position="[lon, lat]", get_fill_color=[30, 36, 48, 255],
                                 get_radius=60, radius_min_pixels=7, radius_max_pixels=9, pickable=True,
                                 stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=3))
         view_df = pd.concat([view_df, me[["lat", "lon"]]])
-    st.pydeck_chart(pdk.Deck(
+    event = st.pydeck_chart(pdk.Deck(
         initial_view_state=fit_view(view_df),
         layers=layers,
         tooltip={"text": "{name}\n{sports} · 강좌 {n}개"},
-    ))
+    ), on_select="rerun", selection_mode="single-object",
+        key=f"facmap-{focus['name'] if focus else 'all'}")  # 좁힐 때마다 키를 바꿔 이전 선택을 초기화
+    picked = (event.selection.get("objects") or {}).get("fac") if event else None
+    if picked:
+        o = picked[0]
+        st.session_state.focus = {"name": o["name"], "sido": o["sido"], "sigungu": o["sigungu"]}
+        st.rerun()
 
 # ============================================================================ 출처
 meta = data_meta()

@@ -68,8 +68,20 @@ def score_sports(mapping, ranks, upto_rank):
                                "via": f"{r}순위 부족 오행 {elem}({role})",
                                "primary": info["primary"], "secondary": info.get("secondary"),
                                "reason": info["reason"]}
-    # 명시적 tie-break: 계층 → 종목명(재현성). 같은 계층 안에서는 2단계가 '강좌 있는 종목'을 먼저 채택
-    return sorted(best.values(), key=lambda x: (x["tier"], x["sport"]))
+    # 같은 계층 안에서는 오행을 번갈아 배치(부족 오행이 여럿일 때 한 오행 종목만 몰리지 않게).
+    # 정렬: 계층 → 오행 그룹 안 순번(종목명순) → 오행 순서(목화토금수) → 종목명. 전부 결정적이라 재현 가능.
+    # 2단계는 이 순서대로 훑으며 '강좌 있는 종목'을 채택한다.
+    order = "목화토금수"
+    groups = {}
+    for v in best.values():
+        groups.setdefault((v["tier"], v["element"]), []).append(v)
+    for g in groups.values():
+        for i, v in enumerate(sorted(g, key=lambda x: x["sport"])):
+            v["_slot"] = i
+    pool = sorted(best.values(), key=lambda x: (x["tier"], x["_slot"], order.index(x["element"]), x["sport"]))
+    for v in pool:
+        v.pop("_slot")
+    return pool
 
 
 def step1_candidates(mapping, saju: SajuResult):
