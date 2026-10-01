@@ -286,7 +286,7 @@ with st.spinner("사주를 계산하고 강좌를 찾는 중…"):
         run_cond.sido, run_cond.sigungu, run_cond.radius_km = focus["sido"], [focus["sigungu"]], None
     res = recommend(last["birth"], run_cond)
     picks = res["step2"]["picks"]
-    brief = [{k: p[k] for k in ("sport", "element", "role", "primary", "reason")} for p in picks]
+    brief = [{k: p[k] for k in ("sport", "element", "role", "primary")} for p in picks]
     saju_brief = {k: res["saju"][k] for k in ("pillars", "counts", "deficiency_ranks", "day_stem", "day_element")}
     reading = cached_reading(json.dumps(saju_brief, ensure_ascii=False), json.dumps(brief, ensure_ascii=False),
                              bool(api_key()))
@@ -386,7 +386,7 @@ for i, p in enumerate(picks, 1):
     H(f"""
 <div class='rec' style='--c:{color};--t:{tint}'>
   <div class='rec-head'><span class='rank'>{i:02d}</span><span class='sport'>{E(p['sport'])}</span><span class='pill'>{label}</span></div>
-  <div class='reason'>{E(reading['comments'].get(p['sport'], p['reason']))}</div>
+  <div class='reason'>{E(p['reason'])}</div>
   <div class='cls'>
     <div class='fac'>{E(c['facility_name'])}</div>
     <div class='prog'>{E(c['program_name'])}</div>

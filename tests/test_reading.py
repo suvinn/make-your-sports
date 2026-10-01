@@ -38,11 +38,16 @@ def test_llm_failure_falls_back(monkeypatch):
     assert cr.make_reading(res["saju"], res["step2"]["picks"], MAPPING, api_key="x")["source"] == "template"
 
 
-def test_llm_comments_missing_sports_filled_from_mapping(monkeypatch):
-    res = _res()
-    picks = res["step2"]["picks"]
-    monkeypatch.setattr(cr, "llm_reading", lambda *a, **k: {
-        "summary": "풀이", "comments": {picks[0]["sport"]: "AI 코멘트"}, "source": "llm"})
-    r = cr.make_reading(res["saju"], picks, MAPPING, api_key="x")
-    assert r["comments"][picks[0]["sport"]] == "AI 코멘트"
-    assert all(p["sport"] in r["comments"] for p in picks)
+def test_static_reason_leads_with_matched_element():
+    from core.recommend import explain
+    info = MAPPING["sports"]["골프"]          # 토(주)·금(보조)
+    txt = explain(info, "금")                 # 금이 부족해서 추천된 경우
+    assert txt.startswith(info["why"]["금"]) and info["why"]["토"] in txt
+    assert explain(info, "토").startswith(info["why"]["토"])
+
+
+def test_every_sport_has_why_for_its_elements():
+    for s, info in MAPPING["sports"].items():
+        for e in (info["primary"], info.get("secondary")):
+            if e:
+                assert e in info["why"], (s, e)

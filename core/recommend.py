@@ -39,6 +39,16 @@ def load_mapping(path=MAPPING_PATH):
 # --------------------------------------------------------------------------- #
 # 1단계: 종목 후보
 # --------------------------------------------------------------------------- #
+def explain(info, matched):
+    """정적 추천 이유: 사용자의 부족 오행과 맞닿은 문장을 먼저, 이어서 종목의 다른 오행 문장.
+    (LLM 생성 대신 고정 문장 — 같은 종목·같은 이유면 언제나 같은 설명, 효과·성격 단정 없음)"""
+    why = info.get("why") or {}
+    if not why:
+        return info["reason"]
+    others = [e for e in (info["primary"], info.get("secondary")) if e and e != matched and e in why]
+    return " ".join([why.get(matched, info["reason"])] + [why[e] for e in others])
+
+
 def score_sports(mapping, ranks, upto_rank):
     """
     ranks: SajuResult.deficiency_ranks (적은 순, 동률 묶음)
@@ -67,7 +77,7 @@ def score_sports(mapping, ranks, upto_rank):
                 best[sport] = {"sport": sport, "tier": tier, "rank": r, "role": role, "element": elem,
                                "via": f"{r}순위 부족 오행 {elem}({role})",
                                "primary": info["primary"], "secondary": info.get("secondary"),
-                               "reason": info["reason"]}
+                               "reason": explain(info, elem)}
     # 같은 계층 안에서는 오행을 번갈아 배치(부족 오행이 여럿일 때 한 오행 종목만 몰리지 않게).
     # 정렬: 계층 → 오행 그룹 안 순번(종목명순) → 오행 순서(목화토금수) → 종목명. 전부 결정적이라 재현 가능.
     # 2단계는 이 순서대로 훑으며 '강좌 있는 종목'을 채택한다.
