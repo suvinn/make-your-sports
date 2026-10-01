@@ -141,6 +141,12 @@ textarea {font-size: .98rem !important;}
   color: #8A5A00; font-size: .74rem;}
 .howto {font-size: .8rem; color: var(--muted); margin: .1rem 0 .2rem;}
 
+.tool-lb {font-size: .72rem; color: var(--muted); letter-spacing: .06em; margin: 0 0 .15rem;}
+.tool-help {font-size: .78rem; color: var(--muted); margin: .1rem 0 .4rem; line-height: 1.5;}
+[data-testid="stButtonGroup"] button {min-height: 1.85rem !important; padding: .1rem .75rem !important;
+  font-size: .8rem !important; border-radius: 999px !important;}
+[data-testid="stButtonGroup"] button p {font-size: .8rem !important;}
+.st-key-sort_label {width: 100% !important; display: flex !important; justify-content: flex-end;}
 .foot {margin-top: 2.6rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: .78rem; color: var(--muted); line-height: 1.6;}
 
 @media (max-width: 640px) {
@@ -186,9 +192,9 @@ def cached_parse(text, use_key):
 
 
 @st.cache_data(show_spinner=False, max_entries=500)
-def cached_reading(saju_json, picks_json, use_key):
-    """같은 사주·같은 추천 종목이면 풀이를 다시 생성하지 않는다"""
-    return make_reading(json.loads(saju_json), json.loads(picks_json), mapping(), api_key() if use_key else None)
+def cached_reading(saju_json, use_key):
+    """풀이는 사주에만 의존 → 같은 사주면 조건·정렬·지역·시간대를 바꿔도 다시 생성하지 않는다"""
+    return make_reading(json.loads(saju_json), mapping(), api_key() if use_key else None)
 
 
 @st.cache_data
@@ -266,6 +272,8 @@ if submitted:
                   "minute": 0 if time_unknown else birth_min, "birth_sido": birth_sido},
     }
     st.session_state.focus = None
+    st.session_state.fresh = True       # 시간대 필터·정렬을 새 검색 기준으로 초기화
+    st.session_state.sort_label = "추천순"
 if "last" not in st.session_state:
     H(f"<div class='foot'>{mapping()['disclaimer']}</div>")
     st.stop()
@@ -285,16 +293,21 @@ with st.spinner("사주를 계산하고 강좌를 찾는 중…"):
     if focus:  # 지도 클릭·동명 지역 선택으로 시·군·구 좁히기(나머지 조건은 유지)
         sgg = focus["sigungu"] if isinstance(focus["sigungu"], list) else [focus["sigungu"]]
         run_cond.sido, run_cond.sigungu, run_cond.radius_km = focus["sido"], sgg, None
+    parsed_bands = list(parsed["conditions"].time_bands or [])
+    if st.session_state.pop("fresh", False) or "band_filter" not in st.session_state:
+        st.session_state.band_filter = parsed_bands
+    picked_bands = list(st.session_state.band_filter or [])
+    if picked_bands != parsed_bands:  # 사용자가 시간대를 직접 바꿈 → 그 선택이 문장 속 시간 조건보다 우선
+        run_cond.time_bands = picked_bands or None
+        run_cond.start_after = run_cond.start_before = None
     label_to_key = {v: k for k, v in SORT_OPTIONS.items()}
     sort_key = label_to_key.get(st.session_state.get("sort_label", "추천순"), "recommend")
     if sort_key == "distance" and run_cond.near_lat is None:
         sort_key = "recommend"  # 위치를 모르면 거리순 불가
     res = recommend(last["birth"], run_cond, sort=sort_key)
     picks = res["step2"]["picks"]
-    brief = [{k: p[k] for k in ("sport", "element", "role", "primary")} for p in picks]
     saju_brief = {k: res["saju"][k] for k in ("pillars", "counts", "deficiency_ranks", "day_stem", "day_element")}
-    reading = cached_reading(json.dumps(saju_brief, ensure_ascii=False), json.dumps(brief, ensure_ascii=False),
-                             bool(api_key()))
+    reading = cached_reading(json.dumps(saju_brief, ensure_ascii=False, sort_keys=True), bool(api_key()))
 
 # ============================================================================ 검색 조건
 cond = res["conditions"]
@@ -387,14 +400,25 @@ for n in saju["notes"]:
 
 # ============================================================================ 추천
 section("추천 강좌", f"{len(picks)}개 종목 · 종목마다 조건에 가장 잘 맞는 강좌 하나씩")
-sort_labels = [SORT_OPTIONS[k] for k in ("recommend", "price", "time")] + \
-    ([SORT_OPTIONS["distance"]] if cond["near_lat"] is not None else [])
+has_loc = cond["near_lat"] is not None
+sort_labels = [SORT_OPTIONS["recommend"]] + ([SORT_OPTIONS["distance"]] if has_loc else []) + [SORT_OPTIONS["price"]]
 if st.session_state.get("sort_label") not in sort_labels:
     st.session_state.sort_label = "추천순"
-_, sort_col = st.columns([1, 1.6])
-sort_col.segmented_control("정렬", sort_labels, key="sort_label", label_visibility="collapsed", width="stretch")
-if sort_key != "recommend":
-    st.caption(f"{SORT_OPTIONS[sort_key]}으로 정렬했어요. 기준값(가격·시간·거리)이 없는 강좌는 뒤로 보내요.")
+tool_l, tool_r = st.columns([1.25, 1])
+with tool_l:
+    H("<div class='tool-lb'>시간대</div>")
+    st.pills("시간대", ["새벽", "오전", "오후", "저녁"], selection_mode="multi", key="band_filter",
+             label_visibility="collapsed")
+with tool_r:
+    H("<div class='tool-lb' style='text-align:right'>정렬</div>")
+    st.segmented_control("정렬", sort_labels, key="sort_label", label_visibility="collapsed")
+SORT_HELP = {
+    "recommend": "추천순: 정보가 확실한 강좌 → " + ("가까운 곳 → " if has_loc else "") + "저렴한 곳 순",
+    "distance": f"가까운 순: ‘{cond['near_label']}’에서 가까운 강좌부터",
+    "price": "저렴한 순: 수강료가 낮은 강좌부터(가격 정보가 없으면 뒤로)",
+}
+hint = SORT_HELP[sort_key] + ("" if has_loc else " · 동네나 역 이름을 쓰면 가까운 순도 볼 수 있어요")
+H(f"<div class='tool-help'>{E(hint)}</div>")
 m = mapping()
 for i, p in enumerate(picks, 1):
     c = p["class"]

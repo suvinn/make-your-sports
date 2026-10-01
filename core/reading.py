@@ -3,7 +3,7 @@
 
 역할 분리 원칙:
 - 종목 선택은 recommend.py의 결정적 규칙이 한다(같은 사주 → 같은 종목, 데이터에 있는 종목만).
-- LLM은 '이미 계산된 사주'를 바탕으로 맨 위 요약 풀이(2~3문장)만 쓴다.
+- LLM은 '이미 계산된 사주'만 받아 맨 위 요약 풀이(2~3문장)를 쓴다(종목·조건과 무관 → 사주 단위 캐시).
 - 종목별 설명은 ohaeng_sports.json의 why 고정 문장(recommend.explain)을 쓴다 — 일관성·표현 통제.
 - 실패하거나 키가 없으면 template_reading()으로 대체(서비스가 멈추지 않게).
 """
@@ -20,7 +20,7 @@ STEM_IMAGE = {  # 일간 이미지(재미용 비유)
 }
 
 
-def template_reading(saju: dict, picks: list, mapping: dict) -> dict:
+def template_reading(saju: dict, mapping: dict) -> dict:
     """LLM 없이 쓰는 기본 풀이. 부족 오행이 여럿이어도 한 문단으로 묶는다."""
     low = saju["deficiency_ranks"][0]
     els = mapping["elements"]
@@ -47,31 +47,29 @@ def _tool():
     }
 
 
-def _prompt(saju, picks, mapping):
+def _prompt(saju, mapping):
+    """풀이는 사주에만 의존한다(추천 종목·조건·정렬과 무관) → 같은 사주면 언제나 같은 캐시를 쓴다."""
     avoid = ", ".join(f"'{a}'" for a in mapping["recommend_rules"]["copy_guide"]["avoid"])
     counts = ", ".join(f"{e} {n}" for e, n in saju["counts"].items())
     pillars = " ".join(f"{k}:{v}" for k, v in saju["pillars"].items() if v)
-    lines = "\n".join(
-        f"- {p['sport']}: {p['element']}({'주' if p['role'] == '주' else '보조'}) 종목 / 주 오행 {p['primary']}"
-        for p in picks)
+    kws = ", ".join(f"{e}={v['keyword']}" for e, v in mapping["elements"].items())
     return (
-        "너는 재미로 보는 사주 앱의 풀이 작가다. 아래 계산 결과를 바탕으로 따뜻하고 가벼운 말투(해요체)로 쓴다.\n"
+        "너는 재미로 보는 사주 앱의 풀이 작가다. 아래 계산 결과를 바탕으로 따뜻하고 가벼운 말투(해요체)로 2~3문장을 쓴다.\n"
         "규칙:\n"
         "- 계산 결과(기둥, 오행 개수, 부족 오행)를 바꾸거나 새로 계산하지 않는다.\n"
-        "- 아래 목록에 있는 종목만 언급한다. 새 종목을 추천하지 않는다.\n"
-        f"- 건강 효과, 운세 개선, 성격 단정은 하지 않는다. 다음 표현은 쓰지 않는다: {avoid}.\n"
-        "- '사주에서는 ~로 봐요', '~해보는 건 어떨까요'처럼 해석·제안의 어조를 유지한다.\n"
-        "- 보조 종목은 '그 오행 기운을 곁들인 종목'으로 설명한다(그 오행 자체의 종목이라고 하지 않는다).\n"
-        "- 종목별 설명은 화면에 따로 있으니, 요약에서는 종목을 나열하지 말고 어떤 성격의 취미가 어울리는지 큰 방향만 말한다.\n\n"
+        "- 특정 종목 이름은 쓰지 않는다(종목은 화면에 따로 나온다). 부족한 오행의 상징에 맞는 '취미의 성격'만 제안한다.\n"
+        "- 건강 효과, 운세 개선, 성격·성향이 맞는다는 단정, '보충할 수 있다' 같은 효과 표현은 하지 않는다. "
+        f"다음 표현도 쓰지 않는다: {avoid}.\n"
+        "- '사주에서는 ~로 봐요', '~해보는 건 어떨까요'처럼 해석·제안의 어조를 유지한다.\n\n"
         f"사주 기둥: {pillars}\n"
         f"일간: {saju['day_stem']} ({saju['day_element']}, 이미지: {STEM_IMAGE.get(saju['day_stem'], '')})\n"
         f"오행 개수: {counts}\n"
         f"부족 순위(적은 순): {' > '.join('·'.join(r) for r in saju['deficiency_ranks'])}\n"
-        f"추천 종목(이미 결정됨):\n{lines}"
+        f"오행 상징: {kws}"
     )
 
 
-def llm_reading(saju: dict, picks: list, mapping: dict, api_key: str | None = None, model: str | None = None) -> dict:
+def llm_reading(saju: dict, mapping: dict, api_key: str | None = None, model: str | None = None) -> dict:
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key or os.environ.get("ANTHROPIC_API_KEY"))
@@ -80,7 +78,7 @@ def llm_reading(saju: dict, picks: list, mapping: dict, api_key: str | None = No
         max_tokens=400,
         tools=[_tool()],
         tool_choice={"type": "tool", "name": "write_reading"},
-        messages=[{"role": "user", "content": _prompt(saju, picks, mapping)}],
+        messages=[{"role": "user", "content": _prompt(saju, mapping)}],
     )
     data = next(b.input for b in msg.content if b.type == "tool_use")
     banned = mapping["recommend_rules"]["copy_guide"]["avoid"]
@@ -90,13 +88,13 @@ def llm_reading(saju: dict, picks: list, mapping: dict, api_key: str | None = No
     return {"summary": text, "source": "llm"}
 
 
-def make_reading(saju: dict, picks: list, mapping: dict, api_key: str | None = None) -> dict:
+def make_reading(saju: dict, mapping: dict, api_key: str | None = None) -> dict:
     """사주 요약 풀이: LLM → 실패 시 기본 풀이. 종목별 설명은 매핑표의 고정 문장을 쓴다(여기서 만들지 않음)."""
-    base = template_reading(saju, picks, mapping)
+    base = template_reading(saju, mapping)
     key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-    if not key or not picks:
+    if not key:
         return base
     try:
-        return llm_reading(saju, picks, mapping, key)
+        return llm_reading(saju, mapping, key)
     except Exception:
         return base

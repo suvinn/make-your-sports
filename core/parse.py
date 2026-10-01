@@ -322,6 +322,7 @@ def _system_prompt():
         "- 문장에 없는 조건은 추측하지 말고 생략한다.\n"
         "- days는 '참석 가능한 요일'이다. '화요일이나 목요일 가능', '화목만 돼요' 모두 '화목'.\n"
         "- 지역은 아래 목록(강좌 데이터가 있는 지역)의 이름을 그대로 쓴다. 목록에 없는 지역이면 사용자가 말한 이름 그대로 넣는다.\n"
+        "- 사용자가 시·도를 말하지 않았고 같은 이름의 시·군·구가 여러 시·도에 있으면(예: 북구, 중구, 서구) sido를 추측해서 넣지 말고 비운다.\n"
         "- 동네·역·랜드마크(예: 신림, 홍대입구, 잠실, 판교)를 말하면 그곳이 속한 시·군·구를 sigungu에 넣고, "
         "원래 이름은 place에, 그 장소의 대략적인 좌표는 place_lat/place_lon에 넣는다.\n"
         f"지역 목록:\n{region_lines}"
@@ -346,6 +347,23 @@ def llm_parse(text: str, api_key: str | None = None, model: str | None = None) -
     raise ValueError("도구 호출 결과가 없습니다")
 
 
+def _drop_guessed_sido(raw: dict, text: str) -> dict:
+    """사용자가 시·도를 말하지 않았는데 LLM이 시·도를 채웠고, 그 시·군·구 이름이 여러 시·도에 있으면
+    (예: '북구' → 부산? 울산?) LLM의 추측을 버린다 → 화면에서 버튼으로 되묻게 된다."""
+    said_sido = any(k in text or v in text for k, v in SIDO_ALIASES.items())
+    if said_sido:
+        return raw
+    names = raw.get("sigungu") or []
+    if isinstance(names, str):
+        names = [names]
+    names = names or ([raw["place"]] if raw.get("place") else [])
+    ambiguous = any(len({p[0] for p in _lookup_region(n)}) > 1 for n in names)
+    if not ambiguous:
+        return raw
+    out = {k: v for k, v in raw.items() if k not in ("sido", "place_lat", "place_lon")}  # 추측 좌표도 버림
+    return out
+
+
 def parse_conditions(text: str, api_key: str | None = None, use_llm: bool = True) -> dict:
     """
     반환: {"conditions": Conditions, "source": "llm"|"rule", "raw": dict, "warnings": [...],
@@ -360,6 +378,8 @@ def parse_conditions(text: str, api_key: str | None = None, use_llm: bool = True
             warnings.append(f"AI 조건 분석에 실패해 기본 분석기로 처리했어요({type(e).__name__}).")
     if raw is None:
         raw = rule_parse(text)
+    elif raw.get("sido"):
+        raw = _drop_guessed_sido(raw, text)
     cond, w, choices = validate_conditions(raw, with_choices=True)
     return {"conditions": cond, "source": source, "raw": raw, "warnings": warnings + w, "choices": choices}
 

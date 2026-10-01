@@ -14,7 +14,7 @@ def _res():
 def test_template_reading_single_paragraph_for_multiple_low_elements():
     res = _res()
     assert res["saju"]["deficiency_ranks"][0] == ["목", "금", "수"]
-    r = cr.template_reading(res["saju"], res["step2"]["picks"], MAPPING)
+    r = cr.template_reading(res["saju"], MAPPING)
     assert r["source"] == "template"
     assert r["summary"].count("사주예요") <= 1 and "목(木)·금(金)·수(水)" in r["summary"]
 
@@ -27,7 +27,7 @@ def test_picks_spread_across_tied_low_elements():
 def test_make_reading_without_key_uses_template(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     res = _res()
-    assert cr.make_reading(res["saju"], res["step2"]["picks"], MAPPING)["source"] == "template"
+    assert cr.make_reading(res["saju"], MAPPING)["source"] == "template"
 
 
 def test_llm_failure_falls_back(monkeypatch):
@@ -35,7 +35,7 @@ def test_llm_failure_falls_back(monkeypatch):
         raise RuntimeError("network")
     monkeypatch.setattr(cr, "llm_reading", boom)
     res = _res()
-    assert cr.make_reading(res["saju"], res["step2"]["picks"], MAPPING, api_key="x")["source"] == "template"
+    assert cr.make_reading(res["saju"], MAPPING, api_key="x")["source"] == "template"
 
 
 def test_static_reason_leads_with_matched_element():
@@ -51,3 +51,9 @@ def test_every_sport_has_why_for_its_elements():
         for e in (info["primary"], info.get("secondary")):
             if e:
                 assert e in info["why"], (s, e)
+
+
+def test_prompt_depends_only_on_saju():
+    res = _res()
+    p = cr._prompt(res["saju"], MAPPING)
+    assert all(s not in p for s in MAPPING["sports"])   # 종목 이름이 프롬프트에 없음

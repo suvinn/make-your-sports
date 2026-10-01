@@ -84,3 +84,19 @@ def test_ambiguous_region_returns_choices():
     r = P("북구에서 할 만한 거")
     assert {c["sido"] for c in r["choices"]} == {"부산광역시", "울산광역시"}
     assert all(c["sigungu"] == ["북구"] for c in r["choices"])
+
+
+
+def test_llm_guessed_sido_is_dropped_for_ambiguous_name(monkeypatch):
+    import core.parse as cp
+    monkeypatch.setattr(cp, "llm_parse", lambda *a, **k: {"sido": "부산광역시", "sigungu": ["북구"], "days": "weekend"})
+    r = cp.parse_conditions("북구에서 주말", api_key="x")
+    assert r["conditions"].sigungu is None
+    assert {c["sido"] for c in r["choices"]} == {"부산광역시", "울산광역시"}
+
+
+def test_llm_sido_kept_when_user_said_it(monkeypatch):
+    import core.parse as cp
+    monkeypatch.setattr(cp, "llm_parse", lambda *a, **k: {"sido": "부산광역시", "sigungu": ["북구"]})
+    r = cp.parse_conditions("부산 북구에서", api_key="x")
+    assert r["conditions"].sido == "부산광역시" and r["conditions"].sigungu == ["북구"] and not r["choices"]
