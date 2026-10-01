@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -97,6 +98,10 @@ class Conditions:
     start_before: str | None = None         # "21:00" 이전 시작
     max_price: int | None = None            # 원
     adult: bool = True                      # 성인 사용자면 아동 전용 강좌 제외
+    near_lat: float | None = None           # 사용자가 말한 장소의 대략 좌표(LLM) — 거리 표시·근처 검색용
+    near_lon: float | None = None
+    near_label: str | None = None           # "신림", "서대문구" 등 원래 이름
+    radius_km: float | None = None          # 근처 검색 반경(시군구 조건이 없을 때만 필터로 사용)
 
     @classmethod
     def from_dict(cls, d):
@@ -104,6 +109,17 @@ class Conditions:
         if isinstance(known.get("sigungu"), str):
             known["sigungu"] = [known["sigungu"]]
         return cls(**known)
+
+
+NEAR_RADII = [4, 8, 15]  # 근처 검색 반경 단계(km)
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
 
 
 def _available_days(days):
@@ -135,9 +151,16 @@ def query_classes(con, sports, cond: Conditions):
     rows = [dict(r) for r in con.execute(" ".join(sql), args)]
 
     avail = _available_days(cond.days)
+    has_near = cond.near_lat is not None and cond.near_lon is not None
     out = []
     for r in rows:
         uncertain = []
+        r["distance_km"] = None
+        if has_near and r["lat"] and r["lon"]:
+            r["distance_km"] = round(haversine_km(cond.near_lat, cond.near_lon, r["lat"], r["lon"]), 1)
+        if has_near and cond.radius_km and not cond.sigungu:
+            if r["distance_km"] is None or r["distance_km"] > cond.radius_km:
+                continue
         # 요일: 강좌 요일이 전부 가능 요일 안에 있어야 함(월수금 강좌는 화목만 되는 사람에게 불가)
         if avail:
             if not r["weekdays"]:
@@ -169,8 +192,10 @@ def query_classes(con, sports, cond: Conditions):
 
 
 def _class_sort_key(r):
-    # 불확실 필드 적은 순 → 가격 낮은 순 → 도보 시간 짧은 순(NULL은 뒤로)
+    # 불확실 필드 적은 순 → (근처 검색이면) 가까운 순 → 가격 낮은 순 → 도보 시간 짧은 순
+    dist = r.get("distance_km")
     return (len(r["uncertain"]),
+            dist if dist is not None else 10**6,
             r["price"] if r["price"] else 10**9,  # 0원/NULL은 가장 비싼 것처럼 뒤로
             r["walk_min"] if r["walk_min"] is not None else 10**6)
 
@@ -178,7 +203,7 @@ def _class_sort_key(r):
 def _public_class(r):
     keys = ["id", "facility_name", "sido", "sigungu", "address", "lat", "lon", "nearest_stop", "walk_min",
             "program_name", "target_raw", "weekdays", "start_time", "end_time", "time_band",
-            "begin_date", "end_date", "capacity", "price", "homepage", "tel", "uncertain"]
+            "begin_date", "end_date", "capacity", "price", "homepage", "tel", "uncertain", "distance_km"]
     return {k: r.get(k) for k in keys}
 
 
@@ -238,7 +263,17 @@ def recommend(birth: dict, conditions: dict | Conditions, db_path=DB_PATH, mappi
     s1 = step1_candidates(mapping, saju)
     con = sqlite3.connect(db_path)
     try:
-        s2 = step2_classes(mapping, saju, s1, cond, con)
+        if cond.near_lat is not None and not cond.sigungu:
+            # 데이터에 없는 지역 → 좌표 근처에서 찾기. 반경을 먼저 넓히고(4→8→15km), 그래도 부족하면 오행 확장
+            for i, radius in enumerate(NEAR_RADII):
+                cond.radius_km = radius
+                s2 = step2_classes(mapping, saju, s1, cond, con)
+                if len(s2["picks"]) >= MIN_SPORTS or i == len(NEAR_RADII) - 1:
+                    break
+            s2["notes"].insert(0, f"‘{cond.near_label}’ 근처 반경 {cond.radius_km:g}km 안의 강좌를 가까운 순으로 골랐어요.")
+            s2["notes"] = [n for n in s2["notes"] if not n.startswith("지역 조건이 없어")]
+        else:
+            s2 = step2_classes(mapping, saju, s1, cond, con)
     finally:
         con.close()
     first = saju.deficiency_ranks[0]

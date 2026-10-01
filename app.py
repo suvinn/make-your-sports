@@ -264,6 +264,10 @@ with st.spinner("사주를 계산하고 강좌를 찾는 중…"):
 # ============================================================================ 검색 조건
 cond = res["conditions"]
 tags = []
+if cond["near_label"] and not cond["sigungu"]:
+    tags.append(f"‘{cond['near_label']}’ 근처 {cond['radius_km']:g}km")
+elif cond["near_label"] and cond["near_label"] not in " ".join(cond["sigungu"] or []):
+    tags.append(f"{cond['near_label']} 기준 거리순")
 if cond["sido"]:
     tags.append(cond["sido"] + (" " + ", ".join(cond["sigungu"]) if cond["sigungu"] else ""))
 if cond["days"]:
@@ -343,6 +347,8 @@ for i, p in enumerate(picks, 1):
     price = f"{c['price']:,}원" if c["price"] else "정보 없음"
     time_txt = c["start_time"] or c["time_band"] or "미상"
     stop = f" · {E(c['nearest_stop'])} 도보 {c['walk_min']}분" if c["nearest_stop"] and c["walk_min"] else ""
+    if c.get("distance_km") is not None:
+        stop += f" · {E(cond['near_label'] or '입력한 곳')}에서 약 {c['distance_km']}km"
     warn = "".join(f"<span class='warn'>{u} 확인 필요</span>" for u in c["uncertain"])
     H(f"""
 <div class='rec' style='--c:{color};--t:{tint}'>
@@ -391,18 +397,29 @@ for p in picks:
         f["sports"].add(p["sport"])
         f["n"] += 1
         f["top"] |= cl is p["class"]
-if len(fac) >= 2:
+has_near = cond["near_lat"] is not None
+if len(fac) >= 2 or (has_near and fac):
     df = pd.DataFrame([{**f, "sports": "·".join(sorted(f["sports"])),
                         "color": rgba("#B4432F", 235) if f["top"] else rgba("#7F848C", 170),
                         "radius": 120 + 40 * min(f["n"], 10)} for f in fac.values()])
     section("조건에 맞는 강좌가 있는 곳", f"시설 {len(df)}곳")
     st.markdown("<div class='muted' style='margin-bottom:.5rem'>붉은 점은 위에 추천된 시설, 회색 점은 같은 조건의 다른 강좌가 있는 시설이에요. "
-                "점이 클수록 강좌가 많고, 마우스를 올리면 시설 이름이 보여요.</div>", unsafe_allow_html=True)
+                "점이 클수록 강좌가 많고, 마우스를 올리면 시설 이름이 보여요."
+      + (" 검은 점은 입력한 위치예요." if has_near else "") + "</div>", unsafe_allow_html=True)
+    layers = [pdk.Layer("ScatterplotLayer", df, get_position="[lon, lat]", get_fill_color="color",
+                        get_radius="radius", radius_min_pixels=6, radius_max_pixels=22, pickable=True,
+                        stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=1)]
+    view_df = df[["lat", "lon"]]
+    if has_near:
+        me = pd.DataFrame([{"name": f"{cond['near_label']} (입력한 곳)", "lat": cond["near_lat"], "lon": cond["near_lon"],
+                            "sports": "기준 위치", "n": 0}])
+        layers.append(pdk.Layer("ScatterplotLayer", me, get_position="[lon, lat]", get_fill_color=[30, 36, 48, 255],
+                                get_radius=60, radius_min_pixels=7, radius_max_pixels=9, pickable=True,
+                                stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=3))
+        view_df = pd.concat([view_df, me[["lat", "lon"]]])
     st.pydeck_chart(pdk.Deck(
-        initial_view_state=fit_view(df),
-        layers=[pdk.Layer("ScatterplotLayer", df, get_position="[lon, lat]", get_fill_color="color",
-                          get_radius="radius", radius_min_pixels=6, radius_max_pixels=22, pickable=True,
-                          stroked=True, get_line_color=[255, 255, 255], line_width_min_pixels=1)],
+        initial_view_state=fit_view(view_df),
+        layers=layers,
         tooltip={"text": "{name}\n{sports} · 강좌 {n}개"},
     ))
 

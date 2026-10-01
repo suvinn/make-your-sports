@@ -124,3 +124,13 @@ def test_zero_price_kept_as_uncertain_without_budget():
     rows = query_classes(con, ["수영"], Conditions(sido="서울특별시", sigungu=["영등포구"]))
     zero = [r for r in rows if r["price"] == 0]
     assert zero and all("가격" in r["uncertain"] for r in zero)
+
+
+def test_near_search_sorted_by_distance_within_radius():
+    res = recommend({"year": 2000, "month": 6, "day": 24, "hour": 12, "minute": 0},
+                    Conditions(near_lat=37.5551, near_lon=126.9368, near_label="신촌"))
+    picks = res["step2"]["picks"]
+    assert picks
+    r = res["conditions"]["radius_km"]
+    assert all(p["class"]["distance_km"] is not None and p["class"]["distance_km"] <= r for p in picks)
+    assert "근처 반경" in res["step2"]["notes"][0]

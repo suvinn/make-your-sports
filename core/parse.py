@@ -15,7 +15,9 @@ import os
 import re
 from functools import lru_cache
 
-from core.recommend import Conditions, TIME_BANDS, list_regions
+import sqlite3
+
+from core.recommend import DB_PATH, Conditions, TIME_BANDS, list_regions
 
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
@@ -67,6 +69,46 @@ def _sigungu_aliases():
     return table
 
 
+@lru_cache(maxsize=1)
+def _emd_aliases():
+    """읍면동 별칭 → {(sido, sigungu)}. 데이터에 있는 동만('신림동'·'신림' → 관악구)"""
+    con = sqlite3.connect(DB_PATH)
+    try:
+        rows = con.execute("SELECT DISTINCT sido, sigungu, emd FROM programs WHERE emd IS NOT NULL").fetchall()
+    finally:
+        con.close()
+    table = {}
+    for sido, sgg, emd in rows:
+        if sgg in SKIP_SIGUNGU:
+            continue
+        base = re.sub(r"(동|리)$", "", re.sub(r"\d*가$", "", emd))
+        for alias in {emd, base}:
+            if len(alias) >= 2:
+                table.setdefault(alias, set()).add((sido, sgg))
+    return table
+
+
+def _lookup_region(name):
+    """시군구 별칭 → 동 별칭 순으로 찾기"""
+    name = (name or "").strip()
+    if not name:
+        return set()
+    sgg = _sigungu_aliases()
+    hit = sgg.get(name) or sgg.get(re.sub(r"(시|군|구)$", "", name))
+    if hit:
+        return set(hit)
+    emd = _emd_aliases()
+    return set(emd.get(name) or emd.get(re.sub(r"(동|역)$", "", name)) or set())
+
+
+def _valid_coord(lat, lon):
+    try:
+        lat, lon = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return None
+    return (lat, lon) if 33.0 <= lat <= 38.9 and 124.5 <= lon <= 131.9 else None
+
+
 def normalize_sido(s):
     if not s:
         return None
@@ -87,22 +129,24 @@ def validate_conditions(raw: dict) -> tuple[Conditions, list[str]]:
     if raw.get("sido") and not sido:
         warnings.append(f"'{raw.get('sido')}' 지역을 인식하지 못했어요.")
 
-    aliases = _sigungu_aliases()
     pairs = set()
     unknown = []
     sggs = raw.get("sigungu") or []
     if isinstance(sggs, str):
         sggs = [sggs]
-    for name in sggs:
-        hit = aliases.get(name.strip()) or aliases.get(re.sub(r"(시|군|구)$", "", name.strip()))
+    place = (raw.get("place") or "").strip() or None
+    names = list(sggs) or ([place] if place else [])
+    for name in names:
+        hit = _lookup_region(name)
         if hit:
             pairs |= hit
         else:
             unknown.append(name)
     if sido:
         pairs = {p for p in pairs if p[0] == sido}
-    if unknown:
-        warnings.append(f"{', '.join(unknown)}의 강좌 데이터가 없어 지역 조건에서 뺐어요.")
+
+    near = _valid_coord(raw.get("place_lat"), raw.get("place_lon"))
+    near_label = place or (unknown[0] if unknown else None)
 
     sigungu = None
     if pairs:
@@ -112,6 +156,12 @@ def validate_conditions(raw: dict) -> tuple[Conditions, list[str]]:
             sigungu = sorted(p[1] for p in pairs)
         else:
             warnings.append(f"같은 이름의 지역이 여러 곳이에요({', '.join(sorted(sidos))}). 시·도를 함께 알려주세요.")
+    elif unknown and near:
+        # 데이터에 없는 지역이지만 좌표가 있으면 근처 강좌로 찾는다(시·도 경계도 넘어서)
+        warnings.append(f"‘{near_label}’에는 강좌 데이터가 없어 가까운 곳의 강좌를 거리순으로 찾았어요.")
+        sido = None
+    elif unknown:
+        warnings.append(f"{', '.join(unknown)}의 강좌 데이터가 없어 지역 조건에서 뺐어요.")
     if sido and sido not in regions():
         warnings.append(f"{sido}에는 아직 공공체육시설 강좌 데이터가 없어요.")
 
@@ -135,7 +185,9 @@ def validate_conditions(raw: dict) -> tuple[Conditions, list[str]]:
 
     cond = Conditions(sido=sido, sigungu=sigungu, days=days, time_bands=bands,
                       start_after=hhmm(raw.get("start_after")), start_before=hhmm(raw.get("start_before")),
-                      max_price=price, adult=raw.get("adult", True) is not False)
+                      max_price=price, adult=raw.get("adult", True) is not False,
+                      near_lat=near[0] if near else None, near_lon=near[1] if near else None,
+                      near_label=near_label if near else None)
     return cond, warnings
 
 
@@ -176,6 +228,12 @@ def rule_parse(text: str) -> dict:
     found = [a for a in found if not any(table[b] < table[a] for b in found if b != a)]
     if found:
         out["sigungu"] = found
+    else:
+        # 시군구가 없으면 동 이름으로(‘대부분’ 같은 일반어 오인을 막기 위해 앞뒤 경계 확인)
+        for alias in sorted(_emd_aliases(), key=len, reverse=True):
+            if re.search(rf"(?<![가-힣]){re.escape(alias)}(?:동|역)?(?=$|[^가-힣]|에서|에|쪽|근처|부근|인근|사는|살아)", t):
+                out["sigungu"] = [alias]
+                break
 
     # 요일(참석 가능한 요일)
     weekday, weekend = bool(re.search(r"평일|주중", t)), "주말" in t
@@ -231,6 +289,10 @@ def _tool_schema():
                 "sido": {"type": "string", "description": "시·도 정식 명칭. 아래 지역 목록의 이름만 사용."},
                 "sigungu": {"type": "array", "items": {"type": "string"},
                             "description": "시·군·구. 아래 지역 목록에 있는 이름 그대로. '고양'처럼 여러 구를 뜻하면 해당 구를 모두."},
+                "place": {"type": "string",
+                          "description": "사용자가 말한 동네·역·랜드마크 이름 원문(예: '신림', '홍대입구역', '잠실'). 없으면 생략."},
+                "place_lat": {"type": "number", "description": "place의 대략적인 위도(WGS84). 확실하지 않으면 생략."},
+                "place_lon": {"type": "number", "description": "place의 대략적인 경도(WGS84). 확실하지 않으면 생략."},
                 "days": {"type": "string",
                          "description": "사용자가 '참석 가능한' 요일 집합(희망 요일 아님). 평일 가능→'weekday', "
                                         "주말 가능→'weekend', 특정 요일만 가능→요일 글자 나열(예: 화·목만→'화목'). "
@@ -255,6 +317,8 @@ def _system_prompt():
         "- 문장에 없는 조건은 추측하지 말고 생략한다.\n"
         "- days는 '참석 가능한 요일'이다. '화요일이나 목요일 가능', '화목만 돼요' 모두 '화목'.\n"
         "- 지역은 아래 목록(강좌 데이터가 있는 지역)의 이름을 그대로 쓴다. 목록에 없는 지역이면 사용자가 말한 이름 그대로 넣는다.\n"
+        "- 동네·역·랜드마크(예: 신림, 홍대입구, 잠실, 판교)를 말하면 그곳이 속한 시·군·구를 sigungu에 넣고, "
+        "원래 이름은 place에, 그 장소의 대략적인 좌표는 place_lat/place_lon에 넣는다.\n"
         f"지역 목록:\n{region_lines}"
     )
 

@@ -52,3 +52,29 @@ def test_child_detection():
 def test_validate_llm_style_output(raw, sido, sgg):
     c, _ = validate_conditions(raw)
     assert c.sido == sido and c.sigungu == sgg
+
+
+# ---------------- 동 이름 / 근처 검색 ----------------
+def test_neighborhood_name_maps_to_sigungu():
+    c = P("신림에서 평일 저녁에 하고 싶어")["conditions"]
+    assert c.sigungu == ["관악구"] and c.sido == "서울특별시"
+
+
+def test_common_word_not_treated_as_neighborhood():
+    assert P("대부분 평일이 좋아요")["conditions"].sigungu is None
+
+
+def test_llm_place_with_data_keeps_sigungu_and_coords():
+    c, w = validate_conditions({"sigungu": ["관악구"], "place": "신림", "place_lat": 37.4842, "place_lon": 126.9297})
+    assert c.sigungu == ["관악구"] and c.near_lat and c.near_label == "신림" and not w
+
+
+def test_llm_place_without_data_switches_to_near_search():
+    c, w = validate_conditions({"sigungu": ["서대문구"], "place": "신촌", "place_lat": 37.5551, "place_lon": 126.9368})
+    assert c.sigungu is None and c.sido is None and c.near_label == "신촌"
+    assert any("가까운 곳" in x for x in w)
+
+
+def test_invalid_coords_ignored():
+    c, _ = validate_conditions({"sigungu": ["서대문구"], "place_lat": 0, "place_lon": 0})
+    assert c.near_lat is None
