@@ -147,6 +147,13 @@ textarea {font-size: .98rem !important;}
   font-size: .8rem !important; border-radius: 999px !important;}
 [data-testid="stButtonGroup"] button p {font-size: .8rem !important;}
 .st-key-sort_label {width: 100% !important; display: flex !important; justify-content: flex-end;}
+.bubble {position: relative; background: #FFF6E6; border: 1px solid #EBD6AE; border-radius: 16px;
+  padding: .85rem 1.1rem .85rem 2.9rem; margin: .7rem 0 1.2rem; color: var(--ink); font-size: .9rem; line-height: 1.55;}
+.bubble-ic {position: absolute; left: 1rem; top: .8rem; font-size: 1.1rem;}
+.bubble:after {content: ""; position: absolute; left: 30px; bottom: -9px; border-width: 9px 9px 0; border-style: solid;
+  border-color: #FFF6E6 transparent transparent;}
+.bubble:before {content: ""; position: absolute; left: 29px; bottom: -11px; border-width: 10px 10px 0; border-style: solid;
+  border-color: #EBD6AE transparent transparent;}
 .foot {margin-top: 2.6rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: .78rem; color: var(--muted); line-height: 1.6;}
 
 @media (max-width: 640px) {
@@ -292,7 +299,8 @@ with st.spinner("사주를 계산하고 강좌를 찾는 중…"):
     run_cond = dataclasses.replace(parsed["conditions"])  # 캐시된 객체를 건드리지 않게 복사
     if focus:  # 지도 클릭·동명 지역 선택으로 시·군·구 좁히기(나머지 조건은 유지)
         sgg = focus["sigungu"] if isinstance(focus["sigungu"], list) else [focus["sigungu"]]
-        run_cond.sido, run_cond.sigungu, run_cond.radius_km = focus["sido"], sgg, None
+        run_cond.sido, run_cond.sigungu, run_cond.radius_km = focus["sido"], (sgg or None), None
+        run_cond.near_lat = run_cond.near_lon = run_cond.near_label = None
     parsed_bands = list(parsed["conditions"].time_bands or [])
     if st.session_state.pop("fresh", False) or "band_filter" not in st.session_state:
         st.session_state.band_filter = parsed_bands
@@ -313,7 +321,8 @@ with st.spinner("사주를 계산하고 강좌를 찾는 중…"):
 cond = res["conditions"]
 tags = []
 if cond["near_label"] and not cond["sigungu"]:
-    tags.append(f"‘{cond['near_label']}’ 근처 {cond['radius_km']:g}km")
+    tags.append(f"‘{cond['near_label']}’ 근처 {cond['radius_km']:g}km" if cond["radius_km"]
+                else f"‘{cond['near_label']}’ 기준 전국 · 가까운 순")
 elif cond["near_label"] and cond["near_label"] not in " ".join(cond["sigungu"] or []):
     tags.append(f"{cond['near_label']} 기준 거리순")
 if cond["sido"]:
@@ -344,7 +353,8 @@ def _set_focus(choice):
 
 
 if focus:
-    place = f"{focus['sido']} {', '.join(focus['sigungu']) if isinstance(focus['sigungu'], list) else focus['sigungu']}"
+    _sg = focus["sigungu"] if isinstance(focus["sigungu"], list) else [focus["sigungu"]]
+    place = " ".join([focus["sido"], ", ".join(_sg)]).strip()
     if focus.get("name"):
         st.info(f"지도에서 고른 ‘{focus['name']}’ 시설이 있는 {place}(으)로 좁혀서 다시 추천했어요.")
     else:
@@ -352,12 +362,14 @@ if focus:
     st.button("원래 조건으로 돌아가기", on_click=_clear_focus)
 else:
     for w in parsed["warnings"]:
+        if res.get("fallback") and ("데이터가 없어" in w or "가까운 곳" in w):
+            continue  # 아래 말풍선이 같은 내용을 더 자세히 안내함
         st.info(w)
     choices = parsed.get("choices") or []
     if choices:  # 같은 이름의 지역이 여러 곳 → 버튼으로 되묻기
         cols = st.columns(len(choices))
         for col, ch in zip(cols, choices):
-            col.button(f"{ch['sido']} {', '.join(ch['sigungu'])}", key=f"choice-{ch['sido']}",
+            col.button(" ".join([ch["sido"], ", ".join(ch["sigungu"])]).strip(), key=f"choice-{ch['sido']}",
                        on_click=_set_focus, args=(ch,), width="stretch")
 
 # ============================================================================ 사주
@@ -418,7 +430,10 @@ SORT_HELP = {
     "price": "저렴한 순: 수강료가 낮은 강좌부터(가격 정보가 없으면 뒤로)",
 }
 hint = SORT_HELP[sort_key] + ("" if has_loc else " · 동네나 역 이름을 쓰면 가까운 순도 볼 수 있어요")
-H(f"<div class='tool-help'>{E(hint)}</div>")
+H(f"<div class='tool-help'>{E(hint)} · 시간대는 여러 개 고를 수 있어요</div>")
+if res.get("fallback"):  # 고른 지역에 강좌가 없어 이웃 지역·전국으로 넓힌 경우
+    icon = "🧭" if res["fallback"]["level"] == "nearby" else "🗺️"
+    H(f"<div class='bubble'><span class='bubble-ic'>{icon}</span>{E(res['fallback']['message'])}</div>")
 m = mapping()
 for i, p in enumerate(picks, 1):
     c = p["class"]

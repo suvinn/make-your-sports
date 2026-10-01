@@ -16,7 +16,7 @@ import argparse
 import json
 import math
 import sqlite3
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
 
 from core.saju import compute_saju, SajuResult
@@ -133,7 +133,17 @@ class Conditions:
         return cls(**known)
 
 
-NEAR_RADII = [4, 8, 15]  # 근처 검색 반경 단계(km)
+NEAR_RADII = [4, 8, 15]          # 데이터 없는 지역(좌표만 있음)의 근처 검색 반경(km)
+FALLBACK_RADII = [4, 8, 15, 30]  # 고른 지역에 강좌가 없을 때 이웃 지역으로 넓히는 반경(km)
+# 강좌 데이터가 아예 없는 시·도도 '가까운 순' 전국 검색이 되도록 쓰는 대표 좌표(시청·도청 부근, 대략값)
+SIDO_CENTER = {
+    "서울특별시": (37.5665, 126.9780), "부산광역시": (35.1796, 129.0756), "대구광역시": (35.8714, 128.6014),
+    "인천광역시": (37.4563, 126.7052), "광주광역시": (35.1595, 126.8526), "대전광역시": (36.3504, 127.3845),
+    "울산광역시": (35.5384, 129.3114), "세종특별자치시": (36.4800, 127.2890), "경기도": (37.2636, 127.0286),
+    "강원특별자치도": (37.8813, 127.7298), "충청북도": (36.6424, 127.4890), "충청남도": (36.6588, 126.6728),
+    "전북특별자치도": (35.8242, 127.1480), "전라남도": (34.8161, 126.4629), "경상북도": (36.5684, 128.7294),
+    "경상남도": (35.2279, 128.6811), "제주특별자치도": (33.4996, 126.5312),
+}
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -295,6 +305,70 @@ def step2_classes(mapping, saju: SajuResult, step1, cond: Conditions, con, sort=
 # --------------------------------------------------------------------------- #
 # 통합
 # --------------------------------------------------------------------------- #
+def _near_search(mapping, saju, s1, cond, con, sort, radii):
+    """좌표 기준 반경을 넓혀 가며 찾기(반경 먼저, 그래도 부족하면 step2 안에서 오행 확장)"""
+    for i, radius in enumerate(radii):
+        cond.radius_km = radius
+        s2 = step2_classes(mapping, saju, s1, cond, con, sort)
+        if len(s2["picks"]) >= MIN_SPORTS or i == len(radii) - 1:
+            break
+    s2["notes"] = [n for n in s2["notes"] if not n.startswith("지역 조건이 없어")]
+    if s2["picks"]:
+        s2["notes"].insert(0, f"‘{cond.near_label}’ 근처 반경 {cond.radius_km:g}km 안의 강좌를 가까운 순으로 골랐어요.")
+    return s2
+
+
+def _region_center(con, sido, sigungu):
+    """고른 지역 시설들의 평균 좌표(데이터에 그 지역 시설이 있을 때만)"""
+    sql, args = "SELECT AVG(lat), AVG(lon) FROM programs WHERE lat IS NOT NULL", []
+    if sido:
+        sql += " AND sido = ?"
+        args.append(sido)
+    if sigungu:
+        sql += " AND sigungu IN (%s)" % ",".join("?" * len(sigungu))
+        args += sigungu
+    lat, lon = con.execute(sql, args).fetchone()
+    return (lat, lon) if lat is not None else None
+
+
+def _widen_region(mapping, saju, s1, cond, con, sort):
+    """
+    조건에 맞는 강좌가 하나도 없을 때 지역만 단계적으로 넓힌다(요일·시간·예산·대상은 유지).
+      1) 고른 지역 시설의 중심 좌표에서 반경 4→8→15→30km (이웃 시·군·구)
+      2) 그래도 없거나 그 지역 데이터가 아예 없으면 전국(위치를 알면 가까운 순)
+    """
+    region = " ".join(x for x in [cond.sido, ", ".join(cond.sigungu or [])] if x) or cond.near_label
+    if not region:
+        return step2_classes(mapping, saju, s1, cond, con, sort), cond, None  # 이미 전국 검색이었음
+
+    center = None
+    if cond.near_lat is not None:
+        center = (cond.near_lat, cond.near_lon)
+    elif cond.sido or cond.sigungu:
+        center = _region_center(con, cond.sido, cond.sigungu) or SIDO_CENTER.get(cond.sido)
+
+    if center and (cond.sido or cond.sigungu):  # 1) 이웃 지역으로
+        near = replace(cond, sido=None, sigungu=None, near_lat=center[0], near_lon=center[1], near_label=region)
+        s2 = _near_search(mapping, saju, s1, near, con, sort, FALLBACK_RADII)
+        if s2["picks"]:
+            s2["notes"] = [n for n in s2["notes"] if not n.startswith("‘")]
+            msg = (f"보유한 데이터에서는 ‘{region}’에 조건에 맞는 강좌가 없어서, "
+                   f"가까운 지역(반경 {near.radius_km:g}km)까지 넓혀서 찾았어요.")
+            return s2, near, {"level": "nearby", "message": msg}
+
+    # 2) 전국
+    nat = replace(cond, sido=None, sigungu=None, radius_km=None,
+                  near_lat=center[0] if center else None, near_lon=center[1] if center else None,
+                  near_label=region if center else None)
+    s2 = step2_classes(mapping, saju, s1, nat, con, sort)
+    s2["notes"] = [n for n in s2["notes"] if not n.startswith("지역 조건이 없어")]
+    if not s2["picks"]:
+        return s2, cond, None
+    msg = (f"보유한 데이터에서는 ‘{region}’ 근처에 조건에 맞는 강좌가 없어서 전국에서 찾았어요"
+           + ("(가까운 순)" if center else "") + ". 현재 강좌 데이터는 서울·경기·부산에 많이 모여 있어요.")
+    return s2, nat, {"level": "nationwide", "message": msg}
+
+
 def recommend(birth: dict, conditions: dict | Conditions, db_path=DB_PATH, mapping=None, sort="recommend"):
     """
     birth: {"year": 2000, "month": 6, "day": 24, "hour": 12, "minute": 30, "birth_sido": "서울특별시"}
@@ -309,18 +383,14 @@ def recommend(birth: dict, conditions: dict | Conditions, db_path=DB_PATH, mappi
                         birth.get("minute", 0), birth.get("birth_sido"))
     s1 = step1_candidates(mapping, saju)
     con = sqlite3.connect(db_path)
+    fallback = None
     try:
         if cond.near_lat is not None and not cond.sigungu:
-            # 데이터에 없는 지역 → 좌표 근처에서 찾기. 반경을 먼저 넓히고(4→8→15km), 그래도 부족하면 오행 확장
-            for i, radius in enumerate(NEAR_RADII):
-                cond.radius_km = radius
-                s2 = step2_classes(mapping, saju, s1, cond, con, sort)
-                if len(s2["picks"]) >= MIN_SPORTS or i == len(NEAR_RADII) - 1:
-                    break
-            s2["notes"].insert(0, f"‘{cond.near_label}’ 근처 반경 {cond.radius_km:g}km 안의 강좌를 가까운 순으로 골랐어요.")
-            s2["notes"] = [n for n in s2["notes"] if not n.startswith("지역 조건이 없어")]
+            s2 = _near_search(mapping, saju, s1, cond, con, sort, NEAR_RADII)
         else:
             s2 = step2_classes(mapping, saju, s1, cond, con, sort)
+        if not s2["picks"]:
+            s2, cond, fallback = _widen_region(mapping, saju, s1, cond, con, sort)
     finally:
         con.close()
     if sort != "recommend":
@@ -335,6 +405,7 @@ def recommend(birth: dict, conditions: dict | Conditions, db_path=DB_PATH, mappi
                   "candidates": [{k: c[k] for k in ("sport", "tier", "role", "element", "via", "reason")}
                                  for c in s1["candidates"]]},
         "step2": s2,
+        "fallback": fallback,   # None | {"level": "nearby"|"nationwide", "message": ...} — 화면 말풍선용
         "conditions": asdict(cond),
     }
 

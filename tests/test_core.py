@@ -105,12 +105,24 @@ def test_recommend_one_class_per_sport_and_respects_conditions():
         assert set(c["weekdays"]) <= set("월화수목금")
 
 
-def test_recommend_expands_rank_when_strict():
-    # 강좌가 거의 없는 지역+조건 → 다음 순위 오행으로 넓힌 기록이 남아야 함
-    res = recommend({"year": 2000, "month": 6, "day": 24, "hour": 12, "minute": 30},
-                    {"sido": "충청남도", "days": "weekend"})
-    assert res["step2"]["upto_rank"] > 1 or len(res["step2"]["picks"]) >= 3
-    assert res["step2"]["notes"]
+def test_empty_region_widens_to_neighbors_first():
+    res = recommend({"year": 2000, "month": 1, "day": 13, "hour": 12, "minute": 0},
+                    {"sido": "부산광역시", "sigungu": ["북구"], "days": "weekend"})
+    assert res["fallback"]["level"] == "nearby" and res["step2"]["picks"]
+    assert all(p["class"]["sido"] == "부산광역시" for p in res["step2"]["picks"])
+    assert all(set(p["class"]["weekdays"]) <= set("토일") for p in res["step2"]["picks"])   # 요일 조건 유지
+
+
+def test_region_without_data_falls_back_nationwide_by_distance():
+    res = recommend({"year": 2000, "month": 1, "day": 13, "hour": 12, "minute": 0}, {"sido": "광주광역시"})
+    assert res["fallback"]["level"] == "nationwide" and res["step2"]["picks"]
+    assert all(p["class"]["distance_km"] is not None for p in res["step2"]["picks"])
+
+
+def test_no_fallback_when_results_exist():
+    res = recommend({"year": 2000, "month": 6, "day": 24, "hour": 12, "minute": 0},
+                    {"sido": "서울특별시", "sigungu": ["마포구"]})
+    assert res["fallback"] is None
 
 
 def test_zero_price_excluded_under_budget():

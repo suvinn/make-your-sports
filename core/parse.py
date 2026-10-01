@@ -322,6 +322,7 @@ def _system_prompt():
         "- 문장에 없는 조건은 추측하지 말고 생략한다.\n"
         "- days는 '참석 가능한 요일'이다. '화요일이나 목요일 가능', '화목만 돼요' 모두 '화목'.\n"
         "- 지역은 아래 목록(강좌 데이터가 있는 지역)의 이름을 그대로 쓴다. 목록에 없는 지역이면 사용자가 말한 이름 그대로 넣는다.\n"
+        "- '광주'만 말하면 광주광역시인지 경기도 광주시인지 알 수 없으니 sido·sigungu를 비운다.\n"
         "- 사용자가 시·도를 말하지 않았고 같은 이름의 시·군·구가 여러 시·도에 있으면(예: 북구, 중구, 서구) sido를 추측해서 넣지 말고 비운다.\n"
         "- 동네·역·랜드마크(예: 신림, 홍대입구, 잠실, 판교)를 말하면 그곳이 속한 시·군·구를 sigungu에 넣고, "
         "원래 이름은 place에, 그 장소의 대략적인 좌표는 place_lat/place_lon에 넣는다.\n"
@@ -345,6 +346,23 @@ def llm_parse(text: str, api_key: str | None = None, model: str | None = None) -
         if block.type == "tool_use":
             return dict(block.input)
     raise ValueError("도구 호출 결과가 없습니다")
+
+
+# 시·도 이름과 다른 시·도의 시·군 이름이 겹치는 경우: 사용자가 구분해서 말하지 않으면 버튼으로 묻는다
+SIDO_CITY_CLASH = {
+    "광주": {"explicit": ["광주광역시", "경기"],
+             "choices": [{"sido": "광주광역시", "sigungu": []}, {"sido": "경기도", "sigungu": ["광주시"]}],
+             "label": "광주광역시와 경기도 광주시"},
+}
+
+
+def _clash_choices(raw: dict, text: str):
+    """'광주'처럼 시·도/시·군이 겹치는 이름이면 지역 조건을 비우고 후보를 돌려준다."""
+    for name, rule in SIDO_CITY_CLASH.items():
+        if name in text and not any(x in text for x in rule["explicit"]):
+            out = {k: v for k, v in raw.items() if k not in ("sido", "sigungu", "place", "place_lat", "place_lon")}
+            return out, rule["choices"], f"‘{name}’은(는) {rule['label']} 두 곳이 있어요. 아래에서 골라 주세요."
+    return raw, [], None
 
 
 def _drop_guessed_sido(raw: dict, text: str) -> dict:
@@ -380,7 +398,10 @@ def parse_conditions(text: str, api_key: str | None = None, use_llm: bool = True
         raw = rule_parse(text)
     elif raw.get("sido"):
         raw = _drop_guessed_sido(raw, text)
+    raw, clash, clash_msg = _clash_choices(raw, text or "")
     cond, w, choices = validate_conditions(raw, with_choices=True)
+    if clash:
+        choices, w = clash, w + [clash_msg]
     return {"conditions": cond, "source": source, "raw": raw, "warnings": warnings + w, "choices": choices}
 
 

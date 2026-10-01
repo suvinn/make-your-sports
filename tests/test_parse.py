@@ -36,7 +36,7 @@ def test_sport_word_is_not_region():
 
 
 def test_region_without_data_warns():
-    r = P("광주에서 퇴근 후에")
+    r = P("광주광역시에서 퇴근 후에")
     assert any("데이터가 없어요" in w for w in r["warnings"])
 
 
@@ -100,3 +100,22 @@ def test_llm_sido_kept_when_user_said_it(monkeypatch):
     monkeypatch.setattr(cp, "llm_parse", lambda *a, **k: {"sido": "부산광역시", "sigungu": ["북구"]})
     r = cp.parse_conditions("부산 북구에서", api_key="x")
     assert r["conditions"].sido == "부산광역시" and r["conditions"].sigungu == ["북구"] and not r["choices"]
+
+
+
+@pytest.mark.parametrize("llm_out", [{"sido": "경기도", "sigungu": ["광주시"]}, {"sido": "광주광역시"}, None])
+def test_gwangju_asks_which_one(monkeypatch, llm_out):
+    import core.parse as cp
+    if llm_out is None:
+        r = cp.parse_conditions("광주에서 저녁에", use_llm=False)
+    else:
+        monkeypatch.setattr(cp, "llm_parse", lambda *a, **k: dict(llm_out, time_bands=["저녁"]))
+        r = cp.parse_conditions("광주에서 저녁에", api_key="x")
+    assert [c["sido"] for c in r["choices"]] == ["광주광역시", "경기도"]
+    assert r["conditions"].sido is None and r["conditions"].time_bands == ["저녁"]
+
+
+@pytest.mark.parametrize("text,sido", [("경기 광주에서", "경기도"), ("광주광역시에서", "광주광역시")])
+def test_gwangju_explicit_no_question(text, sido):
+    r = P(text)
+    assert not r["choices"] and r["conditions"].sido == sido
