@@ -20,7 +20,7 @@ import streamlit as st
 
 from core.parse import parse_conditions
 from core.reading import make_reading
-from core.recommend import DB_PATH, load_mapping, recommend
+from core.recommend import DB_PATH, SORT_OPTIONS, load_mapping, recommend
 from core.saju import ELEMENT_OF, SIDO_LONGITUDE
 
 st.set_page_config(page_title="운동운 — 사주로 찾는 우리 동네 운동", page_icon="🏃", layout="centered")
@@ -282,9 +282,14 @@ with st.spinner("사주를 계산하고 강좌를 찾는 중…"):
     q = last["query"]
     parsed = cached_parse(q, bool(api_key()))
     run_cond = dataclasses.replace(parsed["conditions"])  # 캐시된 객체를 건드리지 않게 복사
-    if focus:  # 지도에서 고른 시설의 시·군·구로 좁히기(나머지 조건은 유지)
-        run_cond.sido, run_cond.sigungu, run_cond.radius_km = focus["sido"], [focus["sigungu"]], None
-    res = recommend(last["birth"], run_cond)
+    if focus:  # 지도 클릭·동명 지역 선택으로 시·군·구 좁히기(나머지 조건은 유지)
+        sgg = focus["sigungu"] if isinstance(focus["sigungu"], list) else [focus["sigungu"]]
+        run_cond.sido, run_cond.sigungu, run_cond.radius_km = focus["sido"], sgg, None
+    label_to_key = {v: k for k, v in SORT_OPTIONS.items()}
+    sort_key = label_to_key.get(st.session_state.get("sort_label", "추천순"), "recommend")
+    if sort_key == "distance" and run_cond.near_lat is None:
+        sort_key = "recommend"  # 위치를 모르면 거리순 불가
+    res = recommend(last["birth"], run_cond, sort=sort_key)
     picks = res["step2"]["picks"]
     brief = [{k: p[k] for k in ("sport", "element", "role", "primary")} for p in picks]
     saju_brief = {k: res["saju"][k] for k in ("pillars", "counts", "deficiency_ranks", "day_stem", "day_element")}
@@ -309,7 +314,7 @@ if cond["start_after"]:
 if cond["start_before"]:
     tags.append(f"{cond['start_before']} 이전 시작")
 if cond["max_price"]:
-    tags.append(f"월 {cond['max_price']:,}원 이하")
+    tags.append(f"{cond['max_price']:,}원 이하")
 if not cond["adult"]:
     tags.append("어린이·청소년")
 
@@ -321,12 +326,26 @@ else:
         "<span class='muted'>문장에서 조건을 찾지 못해 전체 강좌에서 찾았어요.</span>"
     badge = f"<span class='badge'>{'AI 분석' if parsed['source'] == 'llm' else '기본 분석'}</span>"
 H(f"<div class='cond'><div class='head'><b>검색 조건</b>{badge}</div>{body}</div>")
+def _set_focus(choice):
+    st.session_state.focus = {"name": None, "sido": choice["sido"], "sigungu": choice["sigungu"]}
+
+
 if focus:
-    st.info(f"지도에서 고른 ‘{focus['name']}’ 시설이 있는 {focus['sigungu']}로 좁혀서 다시 추천했어요.")
+    place = f"{focus['sido']} {', '.join(focus['sigungu']) if isinstance(focus['sigungu'], list) else focus['sigungu']}"
+    if focus.get("name"):
+        st.info(f"지도에서 고른 ‘{focus['name']}’ 시설이 있는 {place}(으)로 좁혀서 다시 추천했어요.")
+    else:
+        st.info(f"{place}(으)로 좁혀서 추천했어요.")
     st.button("원래 조건으로 돌아가기", on_click=_clear_focus)
 else:
     for w in parsed["warnings"]:
         st.info(w)
+    choices = parsed.get("choices") or []
+    if choices:  # 같은 이름의 지역이 여러 곳 → 버튼으로 되묻기
+        cols = st.columns(len(choices))
+        for col, ch in zip(cols, choices):
+            col.button(f"{ch['sido']} {', '.join(ch['sigungu'])}", key=f"choice-{ch['sido']}",
+                       on_click=_set_focus, args=(ch,), width="stretch")
 
 # ============================================================================ 사주
 saju = res["saju"]
@@ -368,6 +387,14 @@ for n in saju["notes"]:
 
 # ============================================================================ 추천
 section("추천 강좌", f"{len(picks)}개 종목 · 종목마다 조건에 가장 잘 맞는 강좌 하나씩")
+sort_labels = [SORT_OPTIONS[k] for k in ("recommend", "price", "time")] + \
+    ([SORT_OPTIONS["distance"]] if cond["near_lat"] is not None else [])
+if st.session_state.get("sort_label") not in sort_labels:
+    st.session_state.sort_label = "추천순"
+_, sort_col = st.columns([1, 1.6])
+sort_col.segmented_control("정렬", sort_labels, key="sort_label", label_visibility="collapsed", width="stretch")
+if sort_key != "recommend":
+    st.caption(f"{SORT_OPTIONS[sort_key]}으로 정렬했어요. 기준값(가격·시간·거리)이 없는 강좌는 뒤로 보내요.")
 m = mapping()
 for i, p in enumerate(picks, 1):
     c = p["class"]
@@ -393,7 +420,7 @@ for i, p in enumerate(picks, 1):
     <div class='meta'>
       <div><span>요일</span>{E(c['weekdays'] or '미상')}</div>
       <div><span>시작</span>{E(time_txt)}</div>
-      <div><span>월 수강료</span>{price}</div>
+      <div><span>수강료</span>{price}</div>
       <div><span>대상</span>{E(c['target_raw'] or '미상')}</div>
     </div>
     <div class='addr'>{E(c['address'] or '')}{stop}</div>
@@ -457,11 +484,11 @@ if len(fac) >= 2 or (has_near and fac):
         layers=layers,
         tooltip={"text": "{name}\n{sports} · 강좌 {n}개"},
     ), on_select="rerun", selection_mode="single-object",
-        key=f"facmap-{focus['name'] if focus else 'all'}")  # 좁힐 때마다 키를 바꿔 이전 선택을 초기화
+        key=f"facmap-{(focus.get('name') or focus['sido']) if focus else 'all'}")  # 좁힐 때마다 키를 바꿔 이전 선택을 초기화
     picked = (event.selection.get("objects") or {}).get("fac") if event else None
     if picked:
         o = picked[0]
-        st.session_state.focus = {"name": o["name"], "sido": o["sido"], "sigungu": o["sigungu"]}
+        st.session_state.focus = {"name": o["name"], "sido": o["sido"], "sigungu": [o["sigungu"]]}
         st.rerun()
 
 # ============================================================================ 출처

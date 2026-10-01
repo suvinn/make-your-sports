@@ -78,3 +78,9 @@ def test_llm_place_without_data_switches_to_near_search():
 def test_invalid_coords_ignored():
     c, _ = validate_conditions({"sigungu": ["서대문구"], "place_lat": 0, "place_lon": 0})
     assert c.near_lat is None
+
+
+def test_ambiguous_region_returns_choices():
+    r = P("북구에서 할 만한 거")
+    assert {c["sido"] for c in r["choices"]} == {"부산광역시", "울산광역시"}
+    assert all(c["sigungu"] == ["북구"] for c in r["choices"])

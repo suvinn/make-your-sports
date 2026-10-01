@@ -121,9 +121,12 @@ def normalize_sido(s):
     return None
 
 
-def validate_conditions(raw: dict) -> tuple[Conditions, list[str]]:
-    """LLM/규칙 결과(dict)를 실제 데이터 기준으로 정규화. (Conditions, 경고 목록)"""
+def validate_conditions(raw: dict, with_choices: bool = False):
+    """LLM/규칙 결과(dict)를 실제 데이터 기준으로 정규화.
+    반환: (Conditions, 경고 목록) — with_choices=True면 (Conditions, 경고 목록, 동명 지역 후보 목록)
+    후보 형식: [{"sido": "부산광역시", "sigungu": ["북구"]}, {"sido": "울산광역시", "sigungu": ["북구"]}]"""
     warnings = []
+    choices = []
     raw = dict(raw or {})
     sido = normalize_sido(raw.get("sido"))
     if raw.get("sido") and not sido:
@@ -155,7 +158,9 @@ def validate_conditions(raw: dict) -> tuple[Conditions, list[str]]:
             sido = sido or sidos.pop()
             sigungu = sorted(p[1] for p in pairs)
         else:
-            warnings.append(f"같은 이름의 지역이 여러 곳이에요({', '.join(sorted(sidos))}). 시·도를 함께 알려주세요.")
+            warnings.append(f"같은 이름의 지역이 여러 곳이에요({', '.join(sorted(sidos))}). 아래에서 골라 주세요.")
+            for sd in sorted(sidos):
+                choices.append({"sido": sd, "sigungu": sorted(p[1] for p in pairs if p[0] == sd)})
     elif unknown and near:
         # 데이터에 없는 지역이지만 좌표가 있으면 근처 강좌로 찾는다(시·도 경계도 넘어서)
         warnings.append(f"‘{near_label}’에는 강좌 데이터가 없어 가까운 곳의 강좌를 거리순으로 찾았어요.")
@@ -188,7 +193,7 @@ def validate_conditions(raw: dict) -> tuple[Conditions, list[str]]:
                       max_price=price, adult=raw.get("adult", True) is not False,
                       near_lat=near[0] if near else None, near_lon=near[1] if near else None,
                       near_label=near_label if near else None)
-    return cond, warnings
+    return (cond, warnings, choices) if with_choices else (cond, warnings)
 
 
 # --------------------------------------------------------------------------- #
@@ -343,7 +348,8 @@ def llm_parse(text: str, api_key: str | None = None, model: str | None = None) -
 
 def parse_conditions(text: str, api_key: str | None = None, use_llm: bool = True) -> dict:
     """
-    반환: {"conditions": Conditions, "source": "llm"|"rule", "raw": dict, "warnings": [...]}
+    반환: {"conditions": Conditions, "source": "llm"|"rule", "raw": dict, "warnings": [...],
+           "choices": [동명 지역 후보 — 화면에서 버튼으로 되묻기]}
     """
     raw, source, warnings = None, "rule", []
     key = api_key or os.environ.get("ANTHROPIC_API_KEY")
@@ -354,8 +360,8 @@ def parse_conditions(text: str, api_key: str | None = None, use_llm: bool = True
             warnings.append(f"AI 조건 분석에 실패해 기본 분석기로 처리했어요({type(e).__name__}).")
     if raw is None:
         raw = rule_parse(text)
-    cond, w = validate_conditions(raw)
-    return {"conditions": cond, "source": source, "raw": raw, "warnings": warnings + w}
+    cond, w, choices = validate_conditions(raw, with_choices=True)
+    return {"conditions": cond, "source": source, "raw": raw, "warnings": warnings + w, "choices": choices}
 
 
 if __name__ == "__main__":

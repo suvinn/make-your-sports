@@ -134,3 +134,20 @@ def test_near_search_sorted_by_distance_within_radius():
     r = res["conditions"]["radius_km"]
     assert all(p["class"]["distance_km"] is not None and p["class"]["distance_km"] <= r for p in picks)
     assert "근처 반경" in res["step2"]["notes"][0]
+
+
+@pytest.mark.parametrize("sort,field", [("price", "price"), ("time", "start_time")])
+def test_sort_orders_cards_with_missing_values_last(sort, field):
+    res = recommend({"year": 2000, "month": 6, "day": 24, "hour": 12, "minute": 0},
+                    {"sido": "서울특별시", "days": "화목"}, sort=sort)
+    vals = [p["class"][field] for p in res["step2"]["picks"]]
+    known = [v for v in vals if v]
+    assert known == sorted(known)
+    assert vals[:len(known)] == known          # 값 없는 강좌는 뒤로
+
+
+def test_sort_does_not_change_which_sports():
+    b = {"year": 2000, "month": 6, "day": 24, "hour": 12, "minute": 0}
+    c = {"sido": "서울특별시", "days": "화목"}
+    a = {p["sport"] for p in recommend(b, c)["step2"]["picks"]}
+    assert a == {p["sport"] for p in recommend(b, c, sort="price")["step2"]["picks"]}

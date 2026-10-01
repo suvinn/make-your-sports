@@ -222,6 +222,29 @@ def _class_sort_key(r):
             r["walk_min"] if r["walk_min"] is not None else 10**6)
 
 
+SORT_OPTIONS = {"recommend": "추천순", "price": "저렴한 순", "time": "시작 시간 순", "distance": "가까운 순"}
+
+
+def _sort_key_for(sort):
+    """정렬 기준별 강좌 키. 어떤 기준이든 그 기준값이 없는 강좌는 뒤로 보낸다(가격 미상이 '저렴한 순' 맨 위에 오지 않게)."""
+    def unc(r):
+        return len(r["uncertain"])
+
+    def dist(r):
+        return r.get("distance_km") if r.get("distance_km") is not None else 10**6
+
+    def price(r):
+        return r["price"] if r["price"] else 10**9
+
+    if sort == "price":
+        return lambda r: (0 if r["price"] else 1, price(r), unc(r), dist(r))
+    if sort == "time":
+        return lambda r: (0 if r["start_time"] else 1, r["start_time"] or "99:99", unc(r), price(r))
+    if sort == "distance":
+        return lambda r: (0 if r.get("distance_km") is not None else 1, dist(r), unc(r), price(r))
+    return _class_sort_key
+
+
 def _public_class(r):
     keys = ["id", "facility_name", "sido", "sigungu", "address", "lat", "lon", "nearest_stop", "walk_min",
             "program_name", "target_raw", "weekdays", "start_time", "end_time", "time_band",
@@ -229,7 +252,7 @@ def _public_class(r):
     return {k: r.get(k) for k in keys}
 
 
-def step2_classes(mapping, saju: SajuResult, step1, cond: Conditions, con):
+def step2_classes(mapping, saju: SajuResult, step1, cond: Conditions, con, sort="recommend"):
     """
     1단계 풀을 우선순위(계층)순으로 훑으며 조건에 맞는 강좌가 있는 종목만 채택(최대 5개, 종목당 1강좌).
     채택 종목이 3개 미만이면 다음 순위 부족 오행으로 풀을 넓혀 다시 훑는다.
@@ -247,7 +270,7 @@ def step2_classes(mapping, saju: SajuResult, step1, cond: Conditions, con):
             cs = by_sport.get(p["sport"])
             if not cs:
                 continue
-            cs.sort(key=_class_sort_key)
+            cs.sort(key=_sort_key_for(sort))
             picks.append({**p, "class": _public_class(cs[0]), "more_count": len(cs) - 1,
                           "alternatives": [_public_class(x) for x in cs[1:21]]})  # 같은 조건의 다른 강좌(최대 20)
             if len(picks) >= MAX_SPORTS:
@@ -272,11 +295,13 @@ def step2_classes(mapping, saju: SajuResult, step1, cond: Conditions, con):
 # --------------------------------------------------------------------------- #
 # 통합
 # --------------------------------------------------------------------------- #
-def recommend(birth: dict, conditions: dict | Conditions, db_path=DB_PATH, mapping=None):
+def recommend(birth: dict, conditions: dict | Conditions, db_path=DB_PATH, mapping=None, sort="recommend"):
     """
     birth: {"year": 2000, "month": 6, "day": 24, "hour": 12, "minute": 30, "birth_sido": "서울특별시"}
            hour를 모르면 None
     conditions: Conditions 또는 dict(LLM 파싱 결과)
+    sort: "recommend"(기본: 사주 우선순위 순, 종목 안에서는 불확실 적은 순) | "price" | "time" | "distance"
+          종목 선택(어떤 종목이 나올지)은 바꾸지 않고, 종목 안의 강좌 선택과 카드 순서만 바꾼다.
     """
     mapping = mapping or load_mapping()
     cond = conditions if isinstance(conditions, Conditions) else Conditions.from_dict(conditions)
@@ -289,15 +314,18 @@ def recommend(birth: dict, conditions: dict | Conditions, db_path=DB_PATH, mappi
             # 데이터에 없는 지역 → 좌표 근처에서 찾기. 반경을 먼저 넓히고(4→8→15km), 그래도 부족하면 오행 확장
             for i, radius in enumerate(NEAR_RADII):
                 cond.radius_km = radius
-                s2 = step2_classes(mapping, saju, s1, cond, con)
+                s2 = step2_classes(mapping, saju, s1, cond, con, sort)
                 if len(s2["picks"]) >= MIN_SPORTS or i == len(NEAR_RADII) - 1:
                     break
             s2["notes"].insert(0, f"‘{cond.near_label}’ 근처 반경 {cond.radius_km:g}km 안의 강좌를 가까운 순으로 골랐어요.")
             s2["notes"] = [n for n in s2["notes"] if not n.startswith("지역 조건이 없어")]
         else:
-            s2 = step2_classes(mapping, saju, s1, cond, con)
+            s2 = step2_classes(mapping, saju, s1, cond, con, sort)
     finally:
         con.close()
+    if sort != "recommend":
+        key = _sort_key_for(sort)
+        s2["picks"].sort(key=lambda p: key({**p["class"], "uncertain": p["class"]["uncertain"]}))
     first = saju.deficiency_ranks[0]
     return {
         "saju": saju.to_dict(),
